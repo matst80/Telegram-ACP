@@ -12,6 +12,22 @@ The repo should be refactored around **one new relay module**, not a blanket con
 
 That shape makes websocket listeners possible, but only by hooking three separate places. The highest-leverage refactor is to introduce a **single seam for session activity** at daemon scope, then keep Telegram and websocket delivery as adapters behind it.
 
+## Status after implementation
+
+The main refactor is now **done** for the current websocket fan-out goal.
+
+- Implemented `src/relay.rs` with `SessionEvent`, `SessionEventSink`, and composite fan-out.
+- Routed user prompts, agent updates, and lifecycle events through the relay from `telegram.rs`, `acp.rs`, `session.rs`, and `daemon.rs`.
+- Added websocket broadcasting in `src/websocket.rs`, enabled from daemon config via `websocket_bind` / `TELEGRAM_ACP_WEBSOCKET_BIND`.
+- Kept Telegram rendering behavior unchanged.
+
+The two remaining follow-ups from the original plan are now **resolved as decisions**:
+
+1. **Do not add `McpActivity` yet.** MCP traffic remains outside the canonical `SessionEvent` seam because the current websocket goal is satisfied by thread/session activity, not raw protocol tracing.
+2. **Do not extract `EventWriter` yet.** Websocket clients now receive canonical `SessionEvent` JSON directly, so there is no second adapter for rendered Telegram-style handler output.
+
+For the current end goal, there are **no required follow-up refactors left**. The only remaining work would come from future product requirements.
+
 ## Current friction
 
 ### 1. Session activity is split across three modules
@@ -53,7 +69,7 @@ By the deletion test, these modules are not the core place where transport compl
 
 ### 1. Introduce a `SessionEvent` relay module at daemon scope
 
-**Files**: `src/types.rs`, `src/daemon.rs`, `src/telegram.rs`, `src/acp.rs`, `src/session.rs`
+**Files**: `src/relay.rs`, `src/daemon.rs`, `src/telegram.rs`, `src/acp.rs`, `src/session.rs`, `src/websocket.rs`
 
 **Problem**
 
@@ -102,12 +118,12 @@ Where the identifiers are known, include both `thread_id` and `acp_session_id`. 
 
 **Seam status**
 
-This would be a **real seam** once there are at least two adapters:
+This is now a **real seam**:
 
 1. a Telegram-facing adapter that preserves today’s behavior
 2. a websocket adapter that broadcasts to listeners
 
-This is the most important refactor.
+This was the most important refactor, and it is now implemented.
 
 ### 2. Split `EventContext` into handler state + transport adapter
 
@@ -148,7 +164,7 @@ Start with a `TelegramEventWriter` adapter. A websocket adapter may not need eve
 
 **Seam status**
 
-This can become a **real seam**, but only if there will actually be a second adapter. If websocket listeners only need raw events and not rendered Telegram-style messages, keep this as a second-phase refactor behind the `SessionEvent` seam.
+This was evaluated after websocket fan-out landed. The result is: **do not extract this seam now**. Websocket listeners consume canonical `SessionEvent` payloads rather than rendered Telegram output, so an `EventWriter` would still be a **hypothetical seam** with limited **leverage**.
 
 ### 3. Add a composite sink, not multiple direct hooks
 
@@ -218,7 +234,7 @@ pub enum SessionEvent {
 
 **Seam status**
 
-Right now this is a **conditional seam**. Add it only if websocket consumers need MCP visibility.
+This decision is now closed for the current scope: keep MCP traffic out of `SessionEvent`. It remains a **conditional seam** that should only be added if websocket consumers explicitly need MCP visibility.
 
 ### 5. Consider a recorder seam only after live fan-out exists
 
@@ -269,12 +285,20 @@ There is only one adapter today: file-backed recording. A trait now would be a h
 
 ## Recommended refactor order
 
-1. **Add `SessionEvent` + `SessionEventSink`** as the main seam.
-2. **Publish all user/agent/lifecycle activity into that seam**.
-3. **Implement a composite sink** with today’s Telegram behavior and the future websocket adapter.
-4. **Decide whether MCP traffic belongs in the seam** after the canonical session event path exists.
-5. **Only then** decide whether handler rendering also needs its own `EventWriter` seam.
-6. **Leave persistence and IPC concrete** until they gain a real second adapter.
+1. **Done**: add `SessionEvent` + `SessionEventSink` as the main seam.
+2. **Done**: publish all user/agent/lifecycle activity into that seam.
+3. **Done**: implement a composite sink with websocket fan-out.
+4. **Done**: decide that MCP traffic does **not** belong in the seam for the current goal.
+5. **Done**: decide that handler rendering does **not** need its own `EventWriter` seam for the current goal.
+6. **Still true**: leave persistence and IPC concrete until they gain a real second adapter.
+
+## Future steps only if requirements change
+
+These are no longer part of the current refactor plan, but they remain valid later extensions:
+
+1. Add `McpActivity` to `SessionEvent` only if websocket consumers need protocol-level MCP tracing.
+2. Extract an `EventWriter` seam only if another consumer needs the same rendered, Telegram-like handler output.
+3. Revisit recorder/persistence seams only if replay, metrics, or webhook delivery needs a second concrete adapter.
 
 ## Testing shape for the new seam
 
