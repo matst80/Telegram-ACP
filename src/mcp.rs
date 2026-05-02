@@ -18,7 +18,9 @@ use teloxide::types::{InputFile, MessageId, ThreadId};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+use crate::ipc;
 use crate::telegraph;
+use crate::types::{DaemonCommand, DaemonResponse};
 
 #[derive(Clone)]
 struct McpServer {
@@ -27,7 +29,16 @@ struct McpServer {
     chat_id: ChatId,
     thread_id: i32,
     project_path: PathBuf,
+    socket_path: PathBuf,
     tool_router: ToolRouter<McpServer>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SpawnAgentArgs {
+    /// Absolute or project-relative path to the project directory
+    directory: String,
+    /// Optional agent name (defined in config)
+    agent: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -45,6 +56,12 @@ struct UploadFileArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct RenameTopicArgs {
+    /// The new name for the Telegram topic
+    name: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct UploadImageArgs {
     /// Absolute or project-relative path
     path: String,
@@ -53,6 +70,70 @@ struct UploadImageArgs {
 
 #[tool_router]
 impl McpServer {
+    /// Change the name of the current Telegram forum topic (thread)
+    #[tool]
+    async fn rename_topic(
+        &self,
+        Parameters(args): Parameters<RenameTopicArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let thread_id = ThreadId(MessageId(self.thread_id));
+        if let Err(e) = self
+            .bot
+            .edit_forum_topic(self.chat_id, thread_id)
+            .name(&args.name)
+            .await
+        {
+            return Err(ErrorData::new(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Failed to rename topic: {e}"),
+                None,
+            ));
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Topic successfully renamed to: {}", args.name
+        ))]))
+    }
+
+    /// Create a new agent session in a new Telegram topic
+    #[tool]
+    async fn spawn_agent(
+        &self,
+        Parameters(args): Parameters<SpawnAgentArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let resolved_path = resolve_path(&self.project_path, &args.directory);
+
+        let cmd = DaemonCommand::NewSession {
+            path: resolved_path,
+            prompt: None,
+            agent: args.agent,
+        };
+
+        match ipc::send_command(&self.socket_path, &cmd).await {
+            Ok(DaemonResponse::SessionCreated {
+                acp_session_id: _,
+                topic_url,
+            }) => Ok(CallToolResult::success(vec![Content::text(format!(
+                "New agent session spawned: {topic_url}"
+            ))])),
+            Ok(DaemonResponse::Error { message }) => Err(ErrorData::new(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Daemon failed to spawn session: {message}"),
+                None,
+            )),
+            Ok(_) => Err(ErrorData::new(
+                ErrorCode::INTERNAL_ERROR,
+                "Unexpected daemon response",
+                None,
+            )),
+            Err(e) => Err(ErrorData::new(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Failed to communicate with daemon: {e}"),
+                None,
+            )),
+        }
+    }
+
     /// Render Markdown file to Telegraph and send link to the user
     #[tool]
     async fn upload_markdown(
@@ -155,6 +236,7 @@ impl McpServer {
         chat_id: ChatId,
         thread_id: i32,
         project_path: PathBuf,
+        socket_path: PathBuf,
     ) -> Self {
         Self {
             bot,
@@ -162,6 +244,7 @@ impl McpServer {
             chat_id,
             thread_id,
             project_path,
+            socket_path,
             tool_router: Self::tool_router(),
         }
     }
@@ -180,12 +263,13 @@ impl McpSession {
         chat_id: ChatId,
         thread_id: i32,
         project_path: PathBuf,
+        socket_path: PathBuf,
     ) -> Result<Self> {
         let id = Uuid::new_v4().to_string();
         let (incoming_tx, incoming_rx) = mpsc::unbounded();
         let (outgoing_tx, outgoing_rx) = mpsc::unbounded();
 
-        let server = McpServer::new(bot, telegraph, chat_id, thread_id, project_path);
+        let server = McpServer::new(bot, telegraph, chat_id, thread_id, project_path, socket_path);
         let session_id_for_log = id.clone();
         tokio::task::spawn_local(async move {
             tracing::debug!(session_id = %session_id_for_log, "MCP server task started, waiting for initialize");

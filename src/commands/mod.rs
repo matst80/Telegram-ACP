@@ -14,6 +14,7 @@ mod commands;
 mod model;
 mod new;
 mod permission;
+mod approval;
 mod remove;
 mod rename;
 mod status;
@@ -27,6 +28,7 @@ use commands::CommandsCommand;
 use model::ModelCommand;
 use new::NewCommand;
 use permission::PermissionCommand;
+use approval::ApprovalCommand;
 use remove::RemoveCommand;
 use rename::RenameCommand;
 use status::StatusCommand;
@@ -72,6 +74,7 @@ fn command_registry() -> Vec<Box<dyn Command>> {
         Box::new(CancelCommand),
         Box::new(ModelCommand),
         Box::new(PermissionCommand),
+        Box::new(ApprovalCommand),
         Box::new(RenameCommand),
         Box::new(RemoveCommand),
         Box::new(CommandsCommand),

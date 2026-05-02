@@ -33,6 +33,7 @@ pub async fn run_session_runtime(
     event_tx: mpsc::UnboundedSender<AgentEvent>,
     status: Arc<Mutex<SessionStatus>>,
     control_state: Arc<Mutex<crate::session_control::SessionControlState>>,
+    permission_handling: Arc<std::sync::Mutex<crate::types::PermissionHandling>>,
     mut mode_state: Option<acp::SessionModeState>,
     mut config_options: Vec<acp::SessionConfigOption>,
 ) {
@@ -94,7 +95,11 @@ pub async fn run_session_runtime(
                                     sess_warn!("Failed to record set_session_mode response: {err}");
                                 }
                             }
-                            *control_state.lock().await = build_control_state(&mode_state, &config_options);
+                            let handling = {
+                                let h = permission_handling.lock().unwrap();
+                                *h
+                            };
+                            *control_state.lock().await = build_control_state(&mode_state, &config_options, handling);
                         }
                         let _ = result_tx.send(result.map(|_| ()));
                     }
@@ -133,13 +138,25 @@ pub async fn run_session_runtime(
                                     }
                                 }
                                 config_options = resp.config_options;
-                                *control_state.lock().await = build_control_state(&mode_state, &config_options);
+                                let handling = {
+                                    let h = permission_handling.lock().unwrap();
+                                    *h
+                                };
+                                *control_state.lock().await = build_control_state(&mode_state, &config_options, handling);
                                 let _ = result_tx.send(Ok(()));
                             }
                             Err(e) => {
                                 let _ = result_tx.send(Err(e));
                             }
                         }
+                    }
+                    Some(SessionCommand::SetPermissionHandling { handling }) => {
+                        sess_info!("Changing permission handling to {:?}", handling);
+                        {
+                            let mut h = permission_handling.lock().unwrap();
+                            *h = handling;
+                        }
+                        *control_state.lock().await = build_control_state(&mode_state, &config_options, handling);
                     }
                     None => {
                         command_closed = true;

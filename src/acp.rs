@@ -1,18 +1,22 @@
 use acp::Agent;
 use agent_client_protocol as acp;
 use anyhow::Result;
+use dashmap::DashMap;
 use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
+use teloxide::prelude::*;
+use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, MessageId, ParseMode, ThreadId};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
+use crate::formatting;
 use crate::session_log::{SessionLog, TranscriptDirection};
-use crate::types::AgentEvent;
+use crate::types::{AgentEvent, PermissionHandling};
 
 pub type SharedStderrTail = Arc<Mutex<VecDeque<String>>>;
 const STDERR_TAIL_MAX_LINES: usize = 50;
@@ -29,6 +33,11 @@ pub struct TelegramClient {
     session_log: Arc<SessionLog>,
     /// When true, session_notification is a no-op (suppresses replay during load).
     pub session_loading_in_progress: Arc<AtomicBool>,
+    pub bot: Bot,
+    pub chat_id: ChatId,
+    pub thread_id: i32,
+    pub permission_handling: Arc<Mutex<PermissionHandling>>,
+    pub pending_permissions: Arc<DashMap<String, oneshot::Sender<acp::PermissionOptionId>>>,
 }
 
 impl TelegramClient {
@@ -36,11 +45,21 @@ impl TelegramClient {
         event_tx: mpsc::UnboundedSender<AgentEvent>,
         session_log: Arc<SessionLog>,
         session_loading_in_progress: Arc<AtomicBool>,
+        bot: Bot,
+        chat_id: ChatId,
+        thread_id: i32,
+        permission_handling: Arc<Mutex<PermissionHandling>>,
+        pending_permissions: Arc<DashMap<String, oneshot::Sender<acp::PermissionOptionId>>>,
     ) -> Self {
         Self {
             event_tx,
             session_log,
             session_loading_in_progress,
+            bot,
+            chat_id,
+            thread_id,
+            permission_handling,
+            pending_permissions,
         }
     }
 
@@ -55,23 +74,81 @@ impl acp::Client for TelegramClient {
         &self,
         args: acp::RequestPermissionRequest,
     ) -> acp::Result<acp::RequestPermissionResponse> {
-        // Auto-approve: pick the first "allow" option, or first option if none are allow
-        let option_id = args
-            .options
-            .iter()
-            .find(|o| {
-                matches!(
-                    o.kind,
-                    acp::PermissionOptionKind::AllowAlways | acp::PermissionOptionKind::AllowOnce
-                )
-            })
-            .or(args.options.first())
-            .map(|o| o.option_id.clone())
-            .unwrap_or_else(|| acp::PermissionOptionId::new("allow_always"));
+        let handling = {
+            let h = self.permission_handling.lock().unwrap();
+            *h
+        };
 
-        Ok(acp::RequestPermissionResponse::new(
-            acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(option_id)),
-        ))
+        if handling == PermissionHandling::Auto {
+            // Auto-approve: pick the first "allow" option, or first option if none are allow
+            let option_id = args
+                .options
+                .iter()
+                .find(|o| {
+                    matches!(
+                        o.kind,
+                        acp::PermissionOptionKind::AllowAlways | acp::PermissionOptionKind::AllowOnce
+                    )
+                })
+                .or(args.options.first())
+                .map(|o| o.option_id.clone())
+                .unwrap_or_else(|| acp::PermissionOptionId::new("allow_always"));
+
+            return Ok(acp::RequestPermissionResponse::new(
+                acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(option_id)),
+            ));
+        }
+
+        // Manual approval
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let (tx, rx) = oneshot::channel();
+        self.pending_permissions.insert(request_id.clone(), tx);
+
+        let mut rows = Vec::new();
+        for option in &args.options {
+            let label = option.name.clone();
+            let data = format!("approve:{}:{}", request_id, option.option_id.0);
+            rows.push(vec![InlineKeyboardButton::callback(label, data)]);
+        }
+
+        let keyboard = InlineKeyboardMarkup::new(rows);
+        let title = args.tool_call.fields.title.as_deref().unwrap_or("Tool Call");
+        let content = args.tool_call.fields.content.as_deref().unwrap_or(&[]);
+        let text = format!(
+            "<b>Permission Requested: {}</b>\n\n{}",
+            formatting::escape_html(title),
+            formatting::format_tool_content(content)
+        );
+
+        let sent = self
+            .bot
+            .send_message(self.chat_id, text)
+            .message_thread_id(ThreadId(MessageId(self.thread_id)))
+            .parse_mode(ParseMode::Html)
+            .reply_markup(keyboard)
+            .await
+            .map_err(|e| acp::Error::new(-32000, format!("Failed to send permission request: {e}")))?;
+
+        match rx.await {
+            Ok(option_id) => {
+                let _ = self
+                    .bot
+                    .edit_message_reply_markup(self.chat_id, sent.id)
+                    .reply_markup(InlineKeyboardMarkup::default())
+                    .await;
+
+                Ok(acp::RequestPermissionResponse::new(
+                    acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(option_id)),
+                ))
+            }
+            Err(_) => {
+                let _ = self
+                    .bot
+                    .edit_message_text(self.chat_id, sent.id, "Permission request cancelled or timed out.")
+                    .await;
+                Err(acp::Error::new(-32000, "Permission request cancelled"))
+            }
+        }
     }
 
     async fn session_notification(&self, args: acp::SessionNotification) -> acp::Result<()> {
@@ -116,6 +193,11 @@ pub fn spawn_agent(
     event_tx: mpsc::UnboundedSender<AgentEvent>,
     session_log: Arc<SessionLog>,
     session_loading_in_progress: Arc<AtomicBool>,
+    bot: Bot,
+    chat_id: ChatId,
+    thread_id: i32,
+    permission_handling: Arc<Mutex<PermissionHandling>>,
+    pending_permissions: Arc<DashMap<String, oneshot::Sender<acp::PermissionOptionId>>>,
 ) -> Result<(
     acp::ClientSideConnection,
     tokio::process::Child,
@@ -140,7 +222,16 @@ pub fn spawn_agent(
 
     let stderr_tail = spawn_stderr_drain(stderr, session_log.clone());
 
-    let client = TelegramClient::new(event_tx, session_log, session_loading_in_progress);
+    let client = TelegramClient::new(
+        event_tx,
+        session_log,
+        session_loading_in_progress,
+        bot,
+        chat_id,
+        thread_id,
+        permission_handling,
+        pending_permissions,
+    );
 
     let (conn, handle_io) = acp::ClientSideConnection::new(client, stdin, stdout, |fut| {
         tokio::task::spawn_local(fut);

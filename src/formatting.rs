@@ -1,4 +1,5 @@
 use agent_client_protocol as acp;
+use similar::TextDiff;
 use telegram_markdown_v2::UnsupportedTagsStrategy;
 
 /// MarkdownV2 formatting utilities for Telegram messages.
@@ -127,6 +128,59 @@ pub fn format_plan(plan: &acp::Plan) -> String {
     }
 
     lines.join("\n")
+}
+
+/// Format tool content (HTML).
+pub fn format_tool_content(contents: &[acp::ToolCallContent]) -> String {
+    let mut parts = Vec::new();
+    for content in contents {
+        match content {
+            acp::ToolCallContent::Content(content) => {
+                let text = match &content.content {
+                    acp::ContentBlock::Text(tc) => tc.text.clone(),
+                    _ => String::new(),
+                };
+                if !text.trim().is_empty() {
+                    parts.push(escape_html(&truncate_message(&text, 1000)));
+                }
+            }
+            acp::ToolCallContent::Diff(diff) => {
+                let diff_text = format_unified_diff(
+                    Some(diff.path.display().to_string()),
+                    diff.old_text.as_deref(),
+                    &diff.new_text,
+                );
+                parts.push(format!(
+                    "<pre>{}</pre>",
+                    escape_html(&truncate_message(&diff_text, 2000))
+                ));
+            }
+            _ => {}
+        }
+    }
+    if parts.is_empty() {
+        "<i>(no content)</i>".to_string()
+    } else {
+        parts.join("\n\n")
+    }
+}
+
+pub fn format_unified_diff(path: Option<String>, old_text: Option<&str>, new_text: &str) -> String {
+    let old = old_text.unwrap_or("");
+    let path = path.unwrap_or_else(|| "file".to_string());
+    let old_header = format!("a/{path}");
+    let new_header = format!("b/{path}");
+    let unified = TextDiff::from_lines(old, new_text)
+        .unified_diff()
+        .context_radius(2)
+        .header(&old_header, &new_header)
+        .to_string();
+
+    if unified.trim().is_empty() {
+        format!("--- {old_header}\n+++ {new_header}\n(no changes)")
+    } else {
+        unified
+    }
 }
 
 /// Format a completed plan message (HTML).

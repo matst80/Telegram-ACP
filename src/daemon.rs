@@ -37,6 +37,7 @@ pub struct DaemonHandle {
     local_start_tx: mpsc::UnboundedSender<StartSessionRequest>,
     /// thread_id -> TopicEntry
     pub topics: DashMap<i32, TopicEntry>,
+    pub pending_permissions: Arc<DashMap<String, oneshot::Sender<acp_sdk::PermissionOptionId>>>,
 }
 
 pub struct TopicEntry {
@@ -57,6 +58,7 @@ pub struct SessionEntry {
     pub status: Arc<tokio::sync::Mutex<SessionStatus>>,
     pub available_commands: Arc<tokio::sync::Mutex<Vec<acp_sdk::AvailableCommand>>>,
     pub control_state: Arc<tokio::sync::Mutex<session_control::SessionControlState>>,
+    pub permission_handling: Arc<std::sync::Mutex<crate::types::PermissionHandling>>,
     pub command_tx: mpsc::UnboundedSender<SessionCommand>,
     pub cancel_tx: mpsc::UnboundedSender<oneshot::Sender<Result<()>>>,
 }
@@ -213,6 +215,24 @@ impl DaemonHandle {
         }
     }
 
+    fn generate_two_words() -> String {
+        const ADJECTIVES: &[&str] = &[
+            "swift", "clever", "vibrant", "silent", "golden", "hyper", "stellar", "bright",
+            "sleek", "agile", "zen", "iron", "quantum", "cyber", "rapid", "solar",
+            "bold", "cool", "epic", "grand", "lunar", "neon", "prime", "sonic"
+        ];
+        const NOUNS: &[&str] = &[
+            "eagle", "fox", "panda", "owl", "tiger", "wave", "storm", "pulse",
+            "orbit", "spark", "edge", "forge", "core", "nexus", "link", "zenith",
+            "hawk", "wolf", "lion", "bear", "crest", "flux", "nova", "shift"
+        ];
+
+        let u = uuid::Uuid::new_v4().as_u128();
+        let adj = ADJECTIVES[(u & 0xFF) as usize % ADJECTIVES.len()];
+        let noun = NOUNS[((u >> 8) & 0xFF) as usize % NOUNS.len()];
+        format!("{} {}", adj, noun)
+    }
+
     /// Spawn a new agent session: create topic, spawn agent, wire everything up.
     /// Waits for ACP init to complete before returning.
     pub async fn spawn_session(
@@ -225,16 +245,27 @@ impl DaemonHandle {
         let (agent_name, agent_cmd) = self.config.resolve_agent(agent.as_deref())?;
 
         // Create forum topic
-        let topic_name = project_path
+        let folder_name = project_path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| path.clone());
+        let topic_name = format!("{}: {}", folder_name, Self::generate_two_words());
         let topic = self
             .bot
             .create_forum_topic(ChatId(self.config.chat_id), &topic_name)
             .icon_color(teloxide::types::Rgb::from_u32(0x6FB9F0))
             .await?;
         let thread_id = topic.thread_id.0 .0;
+
+        let _ = self
+            .bot
+            .send_message(
+                ChatId(self.config.chat_id),
+                format!("<b>Agent is starting up...</b>\n\nStarting ACP session in this topic for <code>{}</code>", crate::formatting::escape_html(&path)),
+            )
+            .message_thread_id(teloxide::types::ThreadId(teloxide::types::MessageId(thread_id)))
+            .parse_mode(teloxide::types::ParseMode::Html)
+            .await;
 
         let acp_session_id = match self
             .enqueue_start_session(
@@ -331,6 +362,16 @@ impl DaemonHandle {
 
     /// Restore a previously persisted session. Skips topic creation since the topic already exists.
     async fn restore_session(&self, thread_id: i32, record: &SessionRecord) -> Result<()> {
+        let _ = self
+            .bot
+            .send_message(
+                ChatId(self.config.chat_id),
+                format!("<b>Agent is restarting...</b>\n\nRestoring ACP session in this topic for <code>{}</code>", crate::formatting::escape_html(&record.project_path.to_string_lossy())),
+            )
+            .message_thread_id(teloxide::types::ThreadId(teloxide::types::MessageId(thread_id)))
+            .parse_mode(teloxide::types::ParseMode::Html)
+            .await;
+
         let acp_session_id = self
             .enqueue_start_session(
                 thread_id,
@@ -421,6 +462,7 @@ impl DaemonHandle {
                 ChatId(self.config.chat_id),
                 thread_id,
                 project_path.clone(),
+                self.config.socket_path.clone(),
             )
             .await?,
         );
@@ -441,15 +483,15 @@ impl DaemonHandle {
             ),
         ));
 
-        // Insert a SessionEntry with a placeholder acp_session_id into topics
-        // *before* spawning the agent. This allows the mcp-relay subprocess to
-        // route its MCP `initialize` request through the IPC handler
-        // (get_mcp_session_by_id) while ACP init is still in flight.
+        // Dispatch to handlers
+        let permission_handling = Arc::new(std::sync::Mutex::new(crate::types::PermissionHandling::Auto));
+
         let control_state = Arc::new(tokio::sync::Mutex::new(
             session_control::SessionControlState {
                 current_permission_mode_id: None,
                 permission_modes: Vec::new(),
                 model_selector: None,
+                permission_handling: crate::types::PermissionHandling::Auto,
             },
         ));
         let session_entry = SessionEntry {
@@ -463,6 +505,7 @@ impl DaemonHandle {
             status: status.clone(),
             available_commands: available_commands.clone(),
             control_state: control_state.clone(),
+            permission_handling: permission_handling.clone(),
             command_tx: command_tx.clone(),
             cancel_tx: cancel_tx.clone(),
         };
@@ -489,6 +532,8 @@ impl DaemonHandle {
                 cancel_rx,
                 status.clone(),
                 control_state,
+                permission_handling,
+                self.pending_permissions.clone(),
                 self.bot.clone(),
                 ChatId(self.config.chat_id),
                 thread_id,
@@ -561,6 +606,8 @@ async fn spawn_and_run_agent(
     cancel_rx: mpsc::UnboundedReceiver<oneshot::Sender<Result<()>>>,
     status: Arc<tokio::sync::Mutex<SessionStatus>>,
     control_state: Arc<tokio::sync::Mutex<session_control::SessionControlState>>,
+    permission_handling: Arc<std::sync::Mutex<crate::types::PermissionHandling>>,
+    pending_permissions: Arc<DashMap<String, oneshot::Sender<acp_sdk::PermissionOptionId>>>,
     bot: Bot,
     chat_id: ChatId,
     thread_id: i32,
@@ -581,6 +628,11 @@ async fn spawn_and_run_agent(
         event_tx.clone(),
         &existing_acp_session_id,
         mcp_servers,
+        bot.clone(),
+        chat_id,
+        thread_id,
+        permission_handling.clone(),
+        pending_permissions,
     )
     .await
     {
@@ -589,15 +641,17 @@ async fn spawn_and_run_agent(
                 "ACP init completed with session {}",
                 bootstrap.session_id
             );
-            if existing_acp_session_id.is_some() && initiated_via_switch {
-                // On daemon restart, we send nothing
-                let msg = "Switched to the selected session. Replay hidden; ready for new prompts.";
-                let _ = bot
-                    .send_message(chat_id, msg)
-                    .message_thread_id(teloxide::types::ThreadId(teloxide::types::MessageId(
-                        thread_id,
-                    )))
-                    .await;
+            if existing_acp_session_id.is_some() {
+                if initiated_via_switch {
+                    // On daemon restart, we send nothing
+                    let msg = "Switched to the selected session. Replay hidden; ready for new prompts.";
+                    let _ = bot
+                        .send_message(chat_id, msg)
+                        .message_thread_id(teloxide::types::ThreadId(teloxide::types::MessageId(
+                            thread_id,
+                        )))
+                        .await;
+                }
                 session_loading_in_progress.store(false, Ordering::Relaxed);
             }
 
@@ -617,9 +671,14 @@ async fn spawn_and_run_agent(
             // Populate initial control state from bootstrap data
             {
                 let mut cs = control_state.lock().await;
+                let handling = {
+                    let h = permission_handling.lock().unwrap();
+                    *h
+                };
                 *cs = session_control::build_control_state(
                     &bootstrap.modes,
                     &bootstrap.config_options,
+                    handling,
                 );
             }
 
@@ -636,6 +695,7 @@ async fn spawn_and_run_agent(
                 event_tx,
                 status,
                 control_state,
+                permission_handling,
                 bootstrap.modes,
                 bootstrap.config_options,
             )
@@ -684,6 +744,11 @@ async fn init_agent(
     event_tx: mpsc::UnboundedSender<AgentEvent>,
     existing_acp_session_id: &Option<String>,
     mcp_servers: Vec<acp_sdk::McpServer>,
+    bot: Bot,
+    chat_id: ChatId,
+    thread_id: i32,
+    permission_handling: Arc<std::sync::Mutex<crate::types::PermissionHandling>>,
+    pending_permissions: Arc<DashMap<String, oneshot::Sender<acp_sdk::PermissionOptionId>>>,
 ) -> Result<(
     agent_client_protocol::ClientSideConnection,
     tokio::process::Child,
@@ -699,6 +764,11 @@ async fn init_agent(
         event_tx,
         session_log.clone(),
         session_loading_in_progress.clone(),
+        bot,
+        chat_id,
+        thread_id,
+        permission_handling,
+        pending_permissions,
     )
     .map_err(|e| {
         anyhow::anyhow!(
@@ -811,6 +881,7 @@ pub async fn run_daemon(config: Config) -> Result<()> {
         telegraph,
         local_start_tx,
         topics: DashMap::new(),
+        pending_permissions: Arc::new(DashMap::new()),
     });
 
     let local_daemon = daemon.clone();
