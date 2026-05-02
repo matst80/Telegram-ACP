@@ -50,6 +50,7 @@ Create `~/.config/telegram-acp/config.toml`:
 bot_token = "<telegram-bot-token>"
 chat_id = 123456789
 default_agent = "claude"
+# websocket_bind = "127.0.0.1:9001"
 
 [claude]
 cmd = "claude-agent-acp"
@@ -65,8 +66,11 @@ Env overrides are also supported:
 - `TELEGRAM_ACP_BOT_TOKEN`
 - `TELEGRAM_ACP_CHAT_ID`
 - `TELEGRAM_ACP_SOCKET_PATH`
+- `TELEGRAM_ACP_WEBSOCKET_BIND`
 - `TELEGRAM_ACP_DEFAULT_AGENT`
 - `TELEGRAM_ACP_TELEGRAPH_AUTHOR`
+
+When `websocket_bind` is set, the daemon starts a websocket listener and broadcasts each `SessionEvent` as a JSON text frame. The stream includes user prompts, agent updates, and session lifecycle events for every thread.
 
 # Hacking
 
@@ -75,7 +79,8 @@ Env overrides are also supported:
 ```text
 CLI ──(Unix socket IPC)──> Daemon ──> ACP Agent subprocesses (stdin/stdout)
                               │
-                              └──> Telegram Bot API (topics, messages)
+                              ├──> Telegram Bot API (topics, messages)
+                              └──> Websocket listeners (session event stream)
 ```
 
 Per session:
@@ -83,6 +88,7 @@ Per session:
 1. Creates/uses a Telegram forum topic (or threaded private chat topic)
 2. Spawns an ACP agent subprocess
 3. Routes user messages -> agent and agent events -> Telegram
+4. Optionally broadcasts the same session activity to websocket listeners
 
 
 ## Mock agent testing
@@ -116,6 +122,7 @@ Then you can send some ACP updates as text via telegram, and it would send those
 - Each session has two unbounded channel pairs:
   - `user_tx`/`user_rx`: user text into prompt loop
   - `event_tx`/`event_rx`: agent output back to Telegram consumer
+- A daemon-scoped `SessionEvent` relay fans out session activity to optional websocket listeners
 - Notification behavior is intentional:
   - first and final message notify
   - intermediate streaming messages are silent
@@ -130,10 +137,12 @@ src/
   daemon.rs        Daemon state, session lifecycle, LocalSet bridge
   session.rs       Prompt loop (PromptRequest orchestration)
   acp.rs           ACP client integration + subprocess handling
+  relay.rs         SessionEvent model and fan-out sinks
   telegram.rs      Bot dispatcher, topic routing, event consumer
   telegraph.rs     Telegraph helpers (account/page publishing)
   ipc.rs           Unix socket NDJSON daemon/client protocol
   types.rs         Shared command/response/event types
+  websocket.rs     Websocket broadcaster for SessionEvent listeners
   formatting.rs    Telegram HTML escaping + message splitting
   bin/mock_agent.rs Mock ACP agent for local testing
 ```

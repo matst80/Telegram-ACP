@@ -64,10 +64,12 @@ impl SessionEventSink for MultiSessionEventSink {
     }
 }
 
+#[allow(dead_code)]
 pub struct ChannelSessionEventSink {
     tx: mpsc::UnboundedSender<SessionEvent>,
 }
 
+#[allow(dead_code)]
 impl ChannelSessionEventSink {
     pub fn new(tx: mpsc::UnboundedSender<SessionEvent>) -> Self {
         Self { tx }

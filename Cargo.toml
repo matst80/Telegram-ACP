@@ -32,6 +32,7 @@ teloxide = { version = "0.17", features = ["macros"] }
 telegram-markdown-v2 = "0.2"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.24"
 tokio-util = { version = "0.7", features = ["compat"] }
 toml = "1.0"
 dirs = "5"

@@ -402,7 +402,7 @@ pub async fn run_event_consumer(
 
         // Inline: simple events
         match event {
-            AgentEvent::Update(acp::SessionUpdate::UsageUpdate(usage)) => {
+            AgentEvent::Update(acp::SessionUpdate::UsageUpdate(_usage)) => {
                 // Usage updates are a bit noisy, we don't send it now
                 // let text = formatting::format_text_message(&format_usage_update(&usage));
                 // ctx.send_html_chunks(&text, true).await;

@@ -11,6 +11,7 @@ pub struct Config {
     #[allow(dead_code)]
     pub telegraph_author_url: Option<String>,
     pub socket_path: PathBuf,
+    pub websocket_bind: Option<String>,
     pub default_agent: String,
     pub agents: HashMap<String, String>,
 }
@@ -22,6 +23,7 @@ struct FileConfig {
     telegraph_author: Option<String>,
     telegraph_author_url: Option<String>,
     socket_path: Option<PathBuf>,
+    websocket_bind: Option<String>,
     default_agent: Option<String>,
     #[serde(flatten)]
     extra_tables: HashMap<String, toml::Table>,
@@ -60,6 +62,7 @@ impl Config {
         )
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/tmp/telegram-acp.sock"));
+        let websocket_bind = env_or("TELEGRAM_ACP_WEBSOCKET_BIND", file_config.websocket_bind);
 
         let agents = parse_agents(&file_config.extra_tables);
         let default_agent = env_or("TELEGRAM_ACP_DEFAULT_AGENT", file_config.default_agent)
@@ -88,6 +91,7 @@ impl Config {
             telegraph_author,
             telegraph_author_url,
             socket_path,
+            websocket_bind,
             default_agent,
             agents,
         })
@@ -104,11 +108,10 @@ impl Config {
             .filter(|v| !v.is_empty())
             .unwrap_or(&self.default_agent);
 
-        let command = self
-            .agents
-            .get(selected_agent)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!(unknown_agent_message(selected_agent, &self.agents)))?;
+        let command =
+            self.agents.get(selected_agent).cloned().ok_or_else(|| {
+                anyhow::anyhow!(unknown_agent_message(selected_agent, &self.agents))
+            })?;
 
         Ok((selected_agent.to_string(), command))
     }

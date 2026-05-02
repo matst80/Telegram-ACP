@@ -20,7 +20,10 @@ use crate::acp;
 use crate::config::Config;
 use crate::mcp;
 use crate::persistence::{self, PersistedTopic};
-use crate::relay::{MultiSessionEventSink, NoopSessionEventSink, SessionEvent, SessionEventSink};
+use crate::relay::{
+    BroadcastSessionEventSink, MultiSessionEventSink, NoopSessionEventSink, SessionEvent,
+    SessionEventSink,
+};
 use crate::session;
 use crate::session_control::{self, SessionCommand};
 use crate::session_log::{self, with_session_context, SessionContext, SessionLog};
@@ -613,19 +616,17 @@ impl DaemonHandle {
         self.persist_topics().await;
 
         session_event_sink
-            .publish(
-                if resumed_session && initiated_via_switch {
-                    SessionEvent::SessionSwitched {
-                        thread_id,
-                        acp_session_id: acp_session_id.clone(),
-                    }
-                } else {
-                    SessionEvent::SessionStarted {
-                        thread_id,
-                        acp_session_id: acp_session_id.clone(),
-                    }
-                },
-            )
+            .publish(if resumed_session && initiated_via_switch {
+                SessionEvent::SessionSwitched {
+                    thread_id,
+                    acp_session_id: acp_session_id.clone(),
+                }
+            } else {
+                SessionEvent::SessionStarted {
+                    thread_id,
+                    acp_session_id: acp_session_id.clone(),
+                }
+            })
             .await;
 
         Ok(acp_session_id)
@@ -944,10 +945,18 @@ pub async fn run_daemon(config: Config) -> Result<()> {
     let telegraph =
         Arc::new(crate::telegraph::create_account(config.telegraph_author.as_deref()).await?);
     let (local_start_tx, mut local_start_rx) = mpsc::unbounded_channel::<StartSessionRequest>();
+    let websocket_events = config
+        .websocket_bind
+        .as_ref()
+        .map(|_| Arc::new(BroadcastSessionEventSink::new(256)));
     let session_event_sink: Arc<dyn SessionEventSink> =
-        Arc::new(MultiSessionEventSink::new(vec![Arc::new(
-            NoopSessionEventSink,
-        )]));
+        if let Some(websocket_events) = websocket_events.as_ref() {
+            Arc::new(MultiSessionEventSink::new(vec![
+                websocket_events.clone() as Arc<dyn SessionEventSink>
+            ]))
+        } else {
+            Arc::new(NoopSessionEventSink)
+        };
 
     let daemon = Arc::new(DaemonHandle {
         config: config.clone(),
@@ -958,6 +967,15 @@ pub async fn run_daemon(config: Config) -> Result<()> {
         topics: DashMap::new(),
         pending_permissions: Arc::new(DashMap::new()),
     });
+
+    if let Some(bind_addr) = config.websocket_bind.clone() {
+        let websocket_events = websocket_events.expect("websocket sink missing");
+        tokio::task::spawn_local(async move {
+            if let Err(err) = crate::websocket::run_server(&bind_addr, websocket_events).await {
+                tracing::error!("Websocket server error: {err}");
+            }
+        });
+    }
 
     let local_daemon = daemon.clone();
     tokio::task::spawn_local(async move {

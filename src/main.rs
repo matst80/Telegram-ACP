@@ -16,6 +16,7 @@ mod telegram;
 #[allow(dead_code)]
 mod telegraph;
 mod types;
+mod websocket;
 
 use clap::{Parser, Subcommand};
 use rolling_file::{BasicRollingFileAppender, RollingConditionBasic};

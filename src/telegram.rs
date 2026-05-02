@@ -50,7 +50,7 @@ async fn handle_message(bot: Bot, msg: Message, daemon: Arc<DaemonHandle>) -> an
     }
 
     if let Some(thread_id) = msg.thread_id {
-        if msg.from().map(|user| user.is_bot).unwrap_or(false) {
+        if msg.from.as_ref().map(|user| user.is_bot).unwrap_or(false) {
             return Ok(());
         }
 
