@@ -8,9 +8,10 @@ mod ipc;
 mod mcp;
 mod mcp_relay;
 mod persistence;
+mod relay;
 mod session;
-mod session_log;
 mod session_control;
+mod session_log;
 mod telegram;
 #[allow(dead_code)]
 mod telegraph;

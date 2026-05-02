@@ -75,7 +75,8 @@ pub struct SessionRecord {
 
 // === Agent Events (sent from ACP Client impl to Telegram sender) ===
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 #[allow(dead_code)]
 pub enum AgentEvent {
     Working,
