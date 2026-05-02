@@ -15,6 +15,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::formatting;
+use crate::relay::{SessionEvent, SessionEventSink};
 use crate::session_log::{SessionLog, TranscriptDirection};
 use crate::types::{AgentEvent, PermissionHandling};
 
@@ -30,6 +31,7 @@ pub struct SessionBootstrap {
 /// Our ACP Client implementation that forwards agent notifications as AgentEvents.
 pub struct TelegramClient {
     event_tx: mpsc::UnboundedSender<AgentEvent>,
+    event_sink: Arc<dyn SessionEventSink>,
     session_log: Arc<SessionLog>,
     /// When true, session_notification is a no-op (suppresses replay during load).
     pub session_loading_in_progress: Arc<AtomicBool>,
@@ -43,6 +45,7 @@ pub struct TelegramClient {
 impl TelegramClient {
     pub fn new(
         event_tx: mpsc::UnboundedSender<AgentEvent>,
+        event_sink: Arc<dyn SessionEventSink>,
         session_log: Arc<SessionLog>,
         session_loading_in_progress: Arc<AtomicBool>,
         bot: Bot,
@@ -53,6 +56,7 @@ impl TelegramClient {
     ) -> Self {
         Self {
             event_tx,
+            event_sink,
             session_log,
             session_loading_in_progress,
             bot,
@@ -63,8 +67,15 @@ impl TelegramClient {
         }
     }
 
-    fn send_event(&self, event: AgentEvent) {
-        let _ = self.event_tx.send(event);
+    async fn send_event(&self, session_id: &acp::SessionId, event: AgentEvent) {
+        let _ = self.event_tx.send(event.clone());
+        self.event_sink
+            .publish(SessionEvent::AgentUpdate {
+                thread_id: self.thread_id,
+                acp_session_id: session_id.to_string(),
+                event,
+            })
+            .await;
     }
 }
 
@@ -87,7 +98,8 @@ impl acp::Client for TelegramClient {
                 .find(|o| {
                     matches!(
                         o.kind,
-                        acp::PermissionOptionKind::AllowAlways | acp::PermissionOptionKind::AllowOnce
+                        acp::PermissionOptionKind::AllowAlways
+                            | acp::PermissionOptionKind::AllowOnce
                     )
                 })
                 .or(args.options.first())
@@ -95,7 +107,9 @@ impl acp::Client for TelegramClient {
                 .unwrap_or_else(|| acp::PermissionOptionId::new("allow_always"));
 
             return Ok(acp::RequestPermissionResponse::new(
-                acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(option_id)),
+                acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(
+                    option_id,
+                )),
             ));
         }
 
@@ -112,7 +126,12 @@ impl acp::Client for TelegramClient {
         }
 
         let keyboard = InlineKeyboardMarkup::new(rows);
-        let title = args.tool_call.fields.title.as_deref().unwrap_or("Tool Call");
+        let title = args
+            .tool_call
+            .fields
+            .title
+            .as_deref()
+            .unwrap_or("Tool Call");
         let content = args.tool_call.fields.content.as_deref().unwrap_or(&[]);
         let text = format!(
             "<b>Permission Requested: {}</b>\n\n{}",
@@ -127,7 +146,9 @@ impl acp::Client for TelegramClient {
             .parse_mode(ParseMode::Html)
             .reply_markup(keyboard)
             .await
-            .map_err(|e| acp::Error::new(-32000, format!("Failed to send permission request: {e}")))?;
+            .map_err(|e| {
+                acp::Error::new(-32000, format!("Failed to send permission request: {e}"))
+            })?;
 
         match rx.await {
             Ok(option_id) => {
@@ -138,13 +159,19 @@ impl acp::Client for TelegramClient {
                     .await;
 
                 Ok(acp::RequestPermissionResponse::new(
-                    acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(option_id)),
+                    acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(
+                        option_id,
+                    )),
                 ))
             }
             Err(_) => {
                 let _ = self
                     .bot
-                    .edit_message_text(self.chat_id, sent.id, "Permission request cancelled or timed out.")
+                    .edit_message_text(
+                        self.chat_id,
+                        sent.id,
+                        "Permission request cancelled or timed out.",
+                    )
                     .await;
                 Err(acp::Error::new(-32000, "Permission request cancelled"))
             }
@@ -176,7 +203,10 @@ impl acp::Client for TelegramClient {
             | acp::SessionUpdate::ToolCallUpdate(_)
             | acp::SessionUpdate::Plan(_)
             | acp::SessionUpdate::AvailableCommandsUpdate(_)
-            | acp::SessionUpdate::UsageUpdate(_) => self.send_event(AgentEvent::Update(update)),
+            | acp::SessionUpdate::UsageUpdate(_) => {
+                self.send_event(&session_id, AgentEvent::Update(update))
+                    .await
+            }
             _ => {
                 // Ignore other notification types (UserMessageChunk, mode/config updates, etc.)
             }
@@ -191,6 +221,7 @@ pub fn spawn_agent(
     agent_cmd: &str,
     project_path: &Path,
     event_tx: mpsc::UnboundedSender<AgentEvent>,
+    event_sink: Arc<dyn SessionEventSink>,
     session_log: Arc<SessionLog>,
     session_loading_in_progress: Arc<AtomicBool>,
     bot: Bot,
@@ -224,6 +255,7 @@ pub fn spawn_agent(
 
     let client = TelegramClient::new(
         event_tx,
+        event_sink,
         session_log,
         session_loading_in_progress,
         bot,
@@ -307,9 +339,8 @@ pub async fn init_session(
     session_log: &SessionLog,
 ) -> Result<SessionBootstrap> {
     let init_request = acp::InitializeRequest::new(acp::ProtocolVersion::V1).client_info(
-            acp::Implementation::new("telegram-acp", env!("CARGO_PKG_VERSION"))
-                .title("Telegram ACP"),
-        );
+        acp::Implementation::new("telegram-acp", env!("CARGO_PKG_VERSION")).title("Telegram ACP"),
+    );
     session_log.log_acp_payload(
         TranscriptDirection::ToAgent,
         &serde_json::json!({ "method": "initialize", "params": &init_request }),
@@ -347,8 +378,7 @@ pub async fn resume_session(
     session_log: &SessionLog,
 ) -> Result<SessionBootstrap> {
     let init_request = acp::InitializeRequest::new(acp::ProtocolVersion::V1).client_info(
-        acp::Implementation::new("telegram-acp", env!("CARGO_PKG_VERSION"))
-            .title("Telegram ACP"),
+        acp::Implementation::new("telegram-acp", env!("CARGO_PKG_VERSION")).title("Telegram ACP"),
     );
     session_log.log_acp_payload(
         TranscriptDirection::ToAgent,
@@ -410,7 +440,8 @@ pub async fn resume_session(
         }
     } else {
         tracing::info!("Agent does not support load_session, creating new session");
-        let new_session_request = acp::NewSessionRequest::new(project_path).mcp_servers(mcp_servers);
+        let new_session_request =
+            acp::NewSessionRequest::new(project_path).mcp_servers(mcp_servers);
         session_log.log_acp_payload(
             TranscriptDirection::ToAgent,
             &serde_json::json!({ "method": "new_session", "params": &new_session_request }),

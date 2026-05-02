@@ -12,6 +12,7 @@ use crate::handlers::plan::PlanHandler;
 use crate::handlers::tool_call::ToolCallHandler;
 use crate::handlers::working::WorkingHandler;
 use crate::handlers::{EventContext, EventHandler};
+use crate::relay::{SessionEvent, SessionEventSink};
 use crate::session_control::{build_control_state, SessionCommand};
 use crate::session_log::{self, with_session_context, TranscriptDirection};
 use crate::types::{AgentEvent, SessionStatus};
@@ -31,6 +32,7 @@ pub async fn run_session_runtime(
     mut command_rx: mpsc::UnboundedReceiver<SessionCommand>,
     mut cancel_rx: mpsc::UnboundedReceiver<oneshot::Sender<anyhow::Result<()>>>,
     event_tx: mpsc::UnboundedSender<AgentEvent>,
+    event_sink: Arc<dyn SessionEventSink>,
     status: Arc<Mutex<SessionStatus>>,
     control_state: Arc<Mutex<crate::session_control::SessionControlState>>,
     permission_handling: Arc<std::sync::Mutex<crate::types::PermissionHandling>>,
@@ -56,8 +58,10 @@ pub async fn run_session_runtime(
                             start_prompt(
                                 conn.clone(),
                                 acp_session_id.clone(),
+                                thread_id,
                                 user_text,
                                 event_tx.clone(),
+                                event_sink.clone(),
                                 status.clone(),
                                 prompt_done_tx.clone(),
                             ).await;
@@ -191,11 +195,27 @@ pub async fn run_session_runtime(
                 match maybe_done {
                     Some(PromptOutcome::Finished(reason)) => {
                         sess_info!("Prompt finished: {}", reason);
-                        let _ = event_tx.send(AgentEvent::Finished(reason));
+                        let event = AgentEvent::Finished(reason);
+                        let _ = event_tx.send(event.clone());
+                        event_sink
+                            .publish(SessionEvent::AgentUpdate {
+                                thread_id,
+                                acp_session_id: acp_session_id.to_string(),
+                                event,
+                            })
+                            .await;
                     }
                     Some(PromptOutcome::Error(err)) => {
                         sess_error!("Prompt failed: {}", err);
-                        let _ = event_tx.send(AgentEvent::Error(err));
+                        let event = AgentEvent::Error(err);
+                        let _ = event_tx.send(event.clone());
+                        event_sink
+                            .publish(SessionEvent::AgentUpdate {
+                                thread_id,
+                                acp_session_id: acp_session_id.to_string(),
+                                event,
+                            })
+                            .await;
                     }
                     None => {
                         sess_error!("Prompt runner closed unexpectedly");
@@ -207,8 +227,10 @@ pub async fn run_session_runtime(
                     start_prompt(
                         conn.clone(),
                         acp_session_id.clone(),
+                        thread_id,
                         next_prompt,
                         event_tx.clone(),
+                        event_sink.clone(),
                         status.clone(),
                         prompt_done_tx.clone(),
                     ).await;
@@ -230,8 +252,10 @@ pub async fn run_session_runtime(
 async fn start_prompt(
     conn: Arc<acp::ClientSideConnection>,
     acp_session_id: acp::SessionId,
+    thread_id: i32,
     user_text: String,
     event_tx: mpsc::UnboundedSender<AgentEvent>,
+    event_sink: Arc<dyn SessionEventSink>,
     status: Arc<Mutex<SessionStatus>>,
     prompt_done_tx: mpsc::UnboundedSender<PromptOutcome>,
 ) {
@@ -242,6 +266,13 @@ async fn start_prompt(
 
     sess_info!("Prompt started");
     let _ = event_tx.send(AgentEvent::Working);
+    event_sink
+        .publish(SessionEvent::AgentUpdate {
+            thread_id,
+            acp_session_id: acp_session_id.to_string(),
+            event: AgentEvent::Working,
+        })
+        .await;
 
     let current_ctx = session_log::try_current_session_context();
     let prompt_future = async move {

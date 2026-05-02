@@ -5,6 +5,7 @@ use teloxide::types::{BotCommandScope, CallbackQuery, MessageKind, Recipient};
 
 use crate::commands;
 use crate::daemon::DaemonHandle;
+use crate::relay::SessionEvent;
 use crate::session_control::SessionCommand;
 
 /// Start the Telegram bot dispatcher. Runs until cancelled.
@@ -85,6 +86,14 @@ async fn handle_topic_message(
     let Some(command_tx) = daemon.get_session_command_tx_by_thread(thread) else {
         return Ok(());
     };
+    daemon
+        .session_event_sink
+        .publish(SessionEvent::UserPrompt {
+            thread_id: thread,
+            acp_session_id: daemon.get_acp_session_id_by_thread(thread),
+            text: text.to_string(),
+        })
+        .await;
 
     command_tx
         .send(SessionCommand::Prompt(text.to_string()))
