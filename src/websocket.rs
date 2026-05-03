@@ -1,4 +1,6 @@
 use std::sync::Arc;
+use std::collections::HashMap;
+use mdns_sd::{ServiceDaemon, ServiceInfo};
 
 use anyhow::Result;
 use futures::{SinkExt, StreamExt};
@@ -54,4 +56,24 @@ async fn handle_connection(
     }
 
     Ok(())
+}
+
+pub fn advertise_service(port: u16) -> Result<ServiceDaemon> {
+    let mdns = ServiceDaemon::new()?;
+    let service_type = "_acp-ws._tcp.local.";
+    let instance_name = format!("acp-ws-{}", port);
+    let mut properties = HashMap::new();
+    properties.insert("version".to_string(), "1.0".to_string());
+
+    let service_info = ServiceInfo::new(
+        service_type,
+        &instance_name,
+        "localhost.local.",
+        "",
+        port,
+        Some(properties),
+    )?;
+
+    mdns.register(service_info)?;
+    Ok(mdns)
 }

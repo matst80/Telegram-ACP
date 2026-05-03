@@ -975,7 +975,23 @@ pub async fn run_daemon(config: Config) -> Result<()> {
 
     if let Some(bind_addr) = config.websocket_bind.clone() {
         let websocket_events = websocket_events.expect("websocket sink missing");
+        let _mdns = if let Ok(addr) = bind_addr.parse::<std::net::SocketAddr>() {
+            match crate::websocket::advertise_service(addr.port()) {
+                Ok(mdns) => {
+                    tracing::info!(port = addr.port(), "Websocket mDNS advertising started");
+                    Some(mdns)
+                }
+                Err(err) => {
+                    tracing::warn!("Failed to start mDNS advertising: {err}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         tokio::task::spawn_local(async move {
+            let _keep_alive = _mdns;
             if let Err(err) = crate::websocket::run_server(&bind_addr, websocket_events).await {
                 tracing::error!("Websocket server error: {err}");
             }
