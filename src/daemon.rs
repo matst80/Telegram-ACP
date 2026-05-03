@@ -81,8 +81,12 @@ impl crate::relay::WebSocketCommandHandler for DaemonHandle {
                 let tx = self
                     .get_session_command_tx_by_thread(thread_id)
                     .ok_or_else(|| anyhow::anyhow!("No active session for thread {}", thread_id))?;
-                tx.send(SessionCommand::Prompt(text))
-                    .map_err(|_| anyhow::anyhow!("Failed to send prompt to session"))?;
+                tx.send(SessionCommand::Prompt(vec![
+                    agent_client_protocol::ContentBlock::Text(
+                        agent_client_protocol::TextContent::new(text),
+                    ),
+                ]))
+                .map_err(|_| anyhow::anyhow!("Failed to send prompt to session"))?;
             }
             crate::relay::WebSocketCommand::Cancel { thread_id } => {
                 self.cancel_session(thread_id).await?;
@@ -396,6 +400,16 @@ impl DaemonHandle {
                 return Err(e);
             }
         };
+
+        if let Some(text) = _prompt {
+            if let Some(tx) = self.get_session_command_tx_by_thread(thread_id) {
+                let _ = tx.send(SessionCommand::Prompt(vec![
+                    agent_client_protocol::ContentBlock::Text(
+                        agent_client_protocol::TextContent::new(text),
+                    ),
+                ]));
+            }
+        }
 
         Ok((acp_session_id, thread_id))
     }

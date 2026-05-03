@@ -44,23 +44,23 @@ pub async fn run_session_runtime(
     let mut prompt_active = false;
     let mut command_closed = false;
     let mut cancel_closed = false;
-    let mut pending_prompts = VecDeque::<String>::new();
+    let mut pending_prompts = VecDeque::<Vec<acp::ContentBlock>>::new();
 
     while !(command_closed && cancel_closed && !prompt_active && pending_prompts.is_empty()) {
         tokio::select! {
             maybe_cmd = command_rx.recv(), if !command_closed => {
                 match maybe_cmd {
-                    Some(SessionCommand::Prompt(user_text)) => {
+                    Some(SessionCommand::Prompt(content)) => {
                         if prompt_active {
                             sess_info!("Prompt queued while another prompt is active");
-                            pending_prompts.push_back(user_text);
+                            pending_prompts.push_back(content);
                             send_queued_notice(&bot, chat_id, thread_id, &pending_prompts).await;
                         } else {
                             start_prompt(
                                 conn.clone(),
                                 acp_session_id.clone(),
                                 thread_id,
-                                user_text,
+                                content,
                                 event_tx.clone(),
                                 event_sink.clone(),
                                 status.clone(),
@@ -255,7 +255,7 @@ async fn start_prompt(
     conn: Arc<acp::ClientSideConnection>,
     acp_session_id: acp::SessionId,
     thread_id: i32,
-    user_text: String,
+    content: Vec<acp::ContentBlock>,
     event_tx: mpsc::UnboundedSender<AgentEvent>,
     event_sink: Arc<dyn SessionEventSink>,
     status: Arc<Mutex<SessionStatus>>,
@@ -278,7 +278,7 @@ async fn start_prompt(
 
     let current_ctx = session_log::try_current_session_context();
     let prompt_future = async move {
-        let request = acp::PromptRequest::new(acp_session_id, vec![user_text.into()]);
+        let request = acp::PromptRequest::new(acp_session_id, content);
         if let Some(ctx) = session_log::try_current_session_context() {
             if let Err(err) = ctx.log().log_acp_payload(
                 TranscriptDirection::ToAgent,
@@ -321,13 +321,14 @@ async fn send_queued_notice(
     bot: &Bot,
     chat_id: ChatId,
     thread_id: i32,
-    queued_prompts: &VecDeque<String>,
+    queued_prompts: &VecDeque<Vec<acp::ContentBlock>>,
 ) {
     let mut lines = Vec::with_capacity(queued_prompts.len() + 2);
     lines.push("Agent is currently working.".to_string());
     lines.push("Your message was queued. Pending queue:".to_string());
-    for (idx, prompt) in queued_prompts.iter().enumerate() {
-        lines.push(format!("{}. {}", idx + 1, formatting::escape_html(prompt)));
+    for (idx, content) in queued_prompts.iter().enumerate() {
+        let text = extract_text_from_content(content);
+        lines.push(format!("{}. {}", idx + 1, formatting::escape_html(&text)));
     }
 
     let text = lines.join("\n");
@@ -450,4 +451,16 @@ fn format_usage_update(usage: &acp::UsageUpdate) -> String {
         "Usage update: {}/{} tokens ({percent:.1}%){}",
         usage.used, usage.size, cost
     )
+}
+
+pub fn extract_text_from_content(content: &[acp::ContentBlock]) -> String {
+    let mut parts = Vec::new();
+    for block in content {
+        if let acp::ContentBlock::Text(tc) = block {
+            if !tc.text.trim().is_empty() {
+                parts.push(tc.text.clone());
+            }
+        }
+    }
+    parts.join(" ")
 }

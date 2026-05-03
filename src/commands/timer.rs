@@ -37,10 +37,10 @@ impl Command for TimerCommand {
         tokio::spawn(async move {
             for _ in 0..repeat {
                 sleep(interval).await;
-                if command_tx
-                    .send(SessionCommand::Prompt(prompt.clone()))
-                    .is_err()
-                {
+                let blocks = vec![agent_client_protocol::ContentBlock::Text(
+                    agent_client_protocol::TextContent::new(prompt.clone()),
+                )];
+                if command_tx.send(SessionCommand::Prompt(blocks)).is_err() {
                     break;
                 }
             }

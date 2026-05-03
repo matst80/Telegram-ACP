@@ -14,6 +14,8 @@ pub enum SessionEvent {
         thread_id: i32,
         acp_session_id: Option<String>,
         text: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        content: Vec<agent_client_protocol::ContentBlock>,
     },
     AgentUpdate {
         thread_id: i32,

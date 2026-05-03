@@ -40,7 +40,11 @@ impl Command for CommandCommand {
             .get_session_command_tx_by_thread(thread_id)
             .context("No active session in this topic")?;
         command_tx
-            .send(SessionCommand::Prompt(prompt))
+            .send(SessionCommand::Prompt(vec![
+                agent_client_protocol::ContentBlock::Text(
+                    agent_client_protocol::TextContent::new(prompt),
+                ),
+            ]))
             .map_err(|_| anyhow::anyhow!("Session command channel closed"))?;
 
         Ok(())

@@ -27,7 +27,7 @@ pub struct SessionControlState {
 
 #[derive(Debug)]
 pub enum SessionCommand {
-    Prompt(String),
+    Prompt(Vec<acp::ContentBlock>),
     SetPermissionMode {
         mode_id: String,
         result_tx: oneshot::Sender<Result<()>>,

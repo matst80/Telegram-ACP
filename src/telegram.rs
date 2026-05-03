@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use teloxide::net::Download;
 
 use teloxide::prelude::*;
 use teloxide::types::{BotCommandScope, CallbackQuery, MessageKind, Recipient};
@@ -76,9 +77,34 @@ async fn handle_message(bot: Bot, msg: Message, daemon: Arc<DaemonHandle>) -> an
             );
         }
 
-        if let Some(text) = msg.text() {
+        let mut content = Vec::new();
+
+        // 1. Check for photos
+        if let Some(photos) = msg.photo() {
+            if let Some(photo) = photos.last() {
+                match download_image_as_base64(&bot, photo.file.id.clone()).await {
+                    Ok((data, mime_type)) => {
+                        content.push(agent_client_protocol::ContentBlock::Image(
+                            agent_client_protocol::ImageContent::new(data, mime_type),
+                        ));
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to download image: {e}");
+                    }
+                }
+            }
+        }
+
+        // 2. Handle text/caption
+        if let Some(text) = msg.text().or_else(|| msg.caption()) {
             let prompt = build_prompt_with_quote(&msg, text);
-            handle_topic_message(&prompt, thread_id, &daemon).await?;
+            content.push(agent_client_protocol::ContentBlock::Text(
+                agent_client_protocol::TextContent::new(prompt),
+            ));
+        }
+
+        if !content.is_empty() {
+            handle_topic_message(content, thread_id, &daemon).await?;
         }
     }
 
@@ -87,7 +113,7 @@ async fn handle_message(bot: Bot, msg: Message, daemon: Arc<DaemonHandle>) -> an
 
 /// Handle a message in a forum topic, routing it to the corresponding agent session.
 async fn handle_topic_message(
-    text: &str,
+    content: Vec<agent_client_protocol::ContentBlock>,
     thread_id: teloxide::types::ThreadId,
     daemon: &DaemonHandle,
 ) -> anyhow::Result<()> {
@@ -95,17 +121,21 @@ async fn handle_topic_message(
     let Some(command_tx) = daemon.get_session_command_tx_by_thread(thread) else {
         return Ok(());
     };
+
+    let text = crate::session::extract_text_from_content(&content);
+
     daemon
         .session_event_sink
         .publish(SessionEvent::UserPrompt {
             thread_id: thread,
             acp_session_id: daemon.get_acp_session_id_by_thread(thread),
-            text: text.to_string(),
+            text,
+            content: content.clone(),
         })
         .await;
 
     command_tx
-        .send(SessionCommand::Prompt(text.to_string()))
+        .send(SessionCommand::Prompt(content))
         .map_err(|_| anyhow::anyhow!("Session command channel closed"))?;
 
     Ok(())
@@ -153,4 +183,29 @@ fn format_blockquote(text: &str) -> String {
         .map(|line| format!("> {line}"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+async fn download_image_as_base64(
+    bot: &Bot,
+    file_id: teloxide::types::FileId,
+) -> anyhow::Result<(String, String)> {
+    use base64::prelude::*;
+
+    let file = bot.get_file(file_id).await?;
+    let mut buf = Vec::new();
+    bot.download_file(&file.path, &mut buf).await?;
+
+    // Infer mime type from extension or default to image/jpeg
+    let mime_type = if file.path.ends_with(".png") {
+        "image/png"
+    } else if file.path.ends_with(".webp") {
+        "image/webp"
+    } else if file.path.ends_with(".gif") {
+        "image/gif"
+    } else {
+        "image/jpeg"
+    };
+
+    let encoded = BASE64_STANDARD.encode(buf);
+    Ok((encoded, mime_type.to_string()))
 }
