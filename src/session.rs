@@ -23,6 +23,7 @@ enum PromptOutcome {
     Error(String),
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_session_runtime(
     conn: Arc<acp::ClientSideConnection>,
     acp_session_id: acp::SessionId,
@@ -249,6 +250,7 @@ pub async fn run_session_runtime(
     sess_info!("Session runtime marked as finished");
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn start_prompt(
     conn: Arc<acp::ClientSideConnection>,
     acp_session_id: acp::SessionId,
@@ -370,9 +372,11 @@ pub async fn run_event_consumer(
 
     while let Some(event) = event_rx.recv().await {
         // AvailableCommandsUpdate: just update cache
-        if let AgentEvent::Update(acp::SessionUpdate::AvailableCommandsUpdate(update)) = &event {
-            *available_commands_cache.lock().await = update.available_commands.clone();
-            continue;
+        if let AgentEvent::Update(update) = &event {
+            if let acp::SessionUpdate::AvailableCommandsUpdate(u) = update.as_ref() {
+                *available_commands_cache.lock().await = u.available_commands.clone();
+                continue;
+            }
         }
 
         // Text chunks → draft handler (streaming)
@@ -402,10 +406,12 @@ pub async fn run_event_consumer(
 
         // Inline: simple events
         match event {
-            AgentEvent::Update(acp::SessionUpdate::UsageUpdate(_usage)) => {
-                // Usage updates are a bit noisy, we don't send it now
-                // let text = formatting::format_text_message(&format_usage_update(&usage));
-                // ctx.send_html_chunks(&text, true).await;
+            AgentEvent::Update(update) => {
+                if let acp::SessionUpdate::UsageUpdate(_usage) = update.as_ref() {
+                    // Usage updates are a bit noisy, we don't send it now
+                    // let text = formatting::format_text_message(&format_usage_update(&usage));
+                    // ctx.send_html_chunks(&text, true).await;
+                }
             }
             AgentEvent::Finished(reason) => {
                 ctx.send_html_chunks(&formatting::format_completion(&reason, None), false)
@@ -426,6 +432,7 @@ pub async fn run_event_consumer(
     sess_info!("Event consumer finished");
 }
 
+#[allow(dead_code)]
 fn format_usage_update(usage: &acp::UsageUpdate) -> String {
     let percent = if usage.size == 0 {
         0.0

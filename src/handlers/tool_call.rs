@@ -31,17 +31,20 @@ impl ToolCallHandler {
 #[async_trait::async_trait(?Send)]
 impl EventHandler for ToolCallHandler {
     async fn handle(&mut self, event: &AgentEvent, ctx: &mut EventContext) -> bool {
-        match event {
-            AgentEvent::Update(acp::SessionUpdate::ToolCall(tool_call)) => {
-                self.handle_tool_call(tool_call, ctx).await;
-                true
+        if let AgentEvent::Update(update) = event {
+            match update.as_ref() {
+                acp::SessionUpdate::ToolCall(tool_call) => {
+                    self.handle_tool_call(tool_call, ctx).await;
+                    return true;
+                }
+                acp::SessionUpdate::ToolCallUpdate(update) => {
+                    self.handle_tool_call_update(update, ctx).await;
+                    return true;
+                }
+                _ => {}
             }
-            AgentEvent::Update(acp::SessionUpdate::ToolCallUpdate(update)) => {
-                self.handle_tool_call_update(update, ctx).await;
-                true
-            }
-            _ => false,
         }
+        false
     }
 
     async fn reset(&mut self, _ctx: &mut EventContext) {

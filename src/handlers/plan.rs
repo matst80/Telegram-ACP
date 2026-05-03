@@ -19,7 +19,10 @@ impl PlanHandler {
 impl EventHandler for PlanHandler {
     async fn handle(&mut self, event: &AgentEvent, ctx: &mut EventContext) -> bool {
         let plan = match event {
-            AgentEvent::Update(acp::SessionUpdate::Plan(plan)) => plan,
+            AgentEvent::Update(update) => match update.as_ref() {
+                acp::SessionUpdate::Plan(plan) => plan,
+                _ => return false,
+            },
             _ => return false,
         };
 

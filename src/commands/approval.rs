@@ -4,8 +4,8 @@ use teloxide::prelude::*;
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, MessageId, ThreadId};
 
 use super::{CallbackContext, Command, CommandContext};
-use crate::types::PermissionHandling;
 use crate::session_control::SessionCommand;
+use crate::types::PermissionHandling;
 
 pub struct ApprovalCommand;
 
@@ -21,10 +21,16 @@ impl Command for ApprovalCommand {
 
     async fn execute(&self, ctx: CommandContext<'_>) -> Result<()> {
         let thread_id = ctx.require_thread_id()?;
-        
+
         let rows = vec![
-            vec![InlineKeyboardButton::callback("Auto Approval", format!("approval:{}:auto", thread_id))],
-            vec![InlineKeyboardButton::callback("Manual Approval", format!("approval:{}:manual", thread_id))],
+            vec![InlineKeyboardButton::callback(
+                "Auto Approval",
+                format!("approval:{}:auto", thread_id),
+            )],
+            vec![InlineKeyboardButton::callback(
+                "Manual Approval",
+                format!("approval:{}:manual", thread_id),
+            )],
         ];
 
         let keyboard = InlineKeyboardMarkup::new(rows);
@@ -59,19 +65,24 @@ impl Command for ApprovalCommand {
 
             if let Some(command_tx) = ctx.daemon.get_session_command_tx_by_thread(thread_id) {
                 let _ = command_tx.send(SessionCommand::SetPermissionHandling { handling });
-                
+
                 ctx.bot
                     .answer_callback_query(ctx.query.id.clone())
                     .text(format!("Permission handling set to {:?}", handling))
                     .await?;
 
                 if let Some(msg) = ctx.query.message.as_ref() {
-                    let _ = ctx.bot
-                        .edit_message_text(msg.chat().id, msg.id(), format!("Permission handling: {:?}", handling))
+                    let _ = ctx
+                        .bot
+                        .edit_message_text(
+                            msg.chat().id,
+                            msg.id(),
+                            format!("Permission handling: {:?}", handling),
+                        )
                         .await;
                 }
             } else {
-                 ctx.bot
+                ctx.bot
                     .answer_callback_query(ctx.query.id.clone())
                     .text("No active session found")
                     .show_alert(true)

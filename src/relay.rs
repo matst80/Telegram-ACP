@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::Serialize;
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::{broadcast, mpsc};
 
 use crate::types::AgentEvent;
 
@@ -115,6 +115,7 @@ impl SessionEventSink for BroadcastSessionEventSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::sync::Mutex;
 
     struct MockEventSink {
         events: Arc<Mutex<Vec<SessionEvent>>>,

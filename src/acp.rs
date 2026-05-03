@@ -43,6 +43,7 @@ pub struct TelegramClient {
 }
 
 impl TelegramClient {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         event_tx: mpsc::UnboundedSender<AgentEvent>,
         event_sink: Arc<dyn SessionEventSink>,
@@ -204,7 +205,7 @@ impl acp::Client for TelegramClient {
             | acp::SessionUpdate::Plan(_)
             | acp::SessionUpdate::AvailableCommandsUpdate(_)
             | acp::SessionUpdate::UsageUpdate(_) => {
-                self.send_event(&session_id, AgentEvent::Update(update))
+                self.send_event(&session_id, AgentEvent::Update(Box::new(update)))
                     .await
             }
             _ => {
@@ -217,6 +218,7 @@ impl acp::Client for TelegramClient {
 
 /// Spawn an ACP agent subprocess and return the connection + child handle.
 /// Must be called within a tokio LocalSet.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_agent(
     agent_cmd: &str,
     project_path: &Path,

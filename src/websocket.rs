@@ -35,7 +35,7 @@ async fn handle_connection(
         tokio::select! {
             event = events.recv() => match event {
                 Ok(payload) => {
-                    writer.send(Message::Text(payload.into())).await?;
+                    writer.send(Message::Text(payload)).await?;
                 }
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
                     tracing::warn!(skipped, "Websocket listener lagged behind session events");

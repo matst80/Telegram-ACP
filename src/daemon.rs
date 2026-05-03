@@ -63,6 +63,7 @@ pub struct SessionEntry {
     pub status: Arc<tokio::sync::Mutex<SessionStatus>>,
     pub available_commands: Arc<tokio::sync::Mutex<Vec<acp_sdk::AvailableCommand>>>,
     pub control_state: Arc<tokio::sync::Mutex<session_control::SessionControlState>>,
+    #[allow(dead_code)]
     pub permission_handling: Arc<std::sync::Mutex<crate::types::PermissionHandling>>,
     pub command_tx: mpsc::UnboundedSender<SessionCommand>,
     pub cancel_tx: mpsc::UnboundedSender<oneshot::Sender<Result<()>>>,
@@ -635,6 +636,7 @@ impl DaemonHandle {
 
 /// Init phase: spawn agent, initialize/resume ACP session, send result back via oneshot.
 /// Run phase: enter session runtime (continues in same task).
+#[allow(clippy::too_many_arguments)]
 async fn spawn_and_run_agent(
     agent_cmd: String,
     project_path: PathBuf,
@@ -782,9 +784,10 @@ async fn spawn_and_run_agent(
 }
 
 /// Spawn agent subprocess, handle IO, and initialize or resume the ACP session.
+#[allow(clippy::too_many_arguments)]
 async fn init_agent(
     agent_cmd: &str,
-    project_path: &PathBuf,
+    project_path: &std::path::Path,
     session_log: Arc<SessionLog>,
     event_tx: mpsc::UnboundedSender<AgentEvent>,
     event_sink: Arc<dyn SessionEventSink>,
@@ -907,7 +910,7 @@ async fn init_agent(
 
 fn build_mcp_servers(
     mcp_session_id: &str,
-    socket_path: &PathBuf,
+    socket_path: &std::path::Path,
 ) -> Result<Vec<acp_sdk::McpServer>> {
     let exe_path = std::env::current_exe()
         .map_err(|e| anyhow::anyhow!("Failed to resolve current executable: {e}"))?;

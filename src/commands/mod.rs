@@ -8,13 +8,14 @@ use teloxide::types::{BotCommand, CallbackQuery, Message};
 use crate::daemon::DaemonHandle;
 use crate::session_control::SessionControlState;
 
+mod approval;
 mod cancel;
 mod command;
+#[allow(clippy::module_inception)]
 mod commands;
 mod model;
 mod new;
 mod permission;
-mod approval;
 mod remove;
 mod rename;
 mod status;
@@ -22,13 +23,13 @@ mod stop_daemon;
 mod switch;
 mod timer;
 
+use approval::ApprovalCommand;
 use cancel::CancelCommand;
 use command::CommandCommand;
 use commands::CommandsCommand;
 use model::ModelCommand;
 use new::NewCommand;
 use permission::PermissionCommand;
-use approval::ApprovalCommand;
 use remove::RemoveCommand;
 use rename::RenameCommand;
 use status::StatusCommand;

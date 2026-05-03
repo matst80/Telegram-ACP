@@ -1,6 +1,6 @@
 use anyhow::Result;
-use telegraph_rs::{html_to_node, Telegraph};
 use pulldown_cmark::{html, Event, Options, Parser, Tag, TagEnd};
+use telegraph_rs::{html_to_node, Telegraph};
 
 /// Create a Telegraph page with file changes from an agent session.
 pub async fn create_diff_post(

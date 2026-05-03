@@ -97,6 +97,7 @@ impl Config {
         })
     }
 
+    #[allow(dead_code)]
     pub fn resolve_agent_command(&self, selected_agent: Option<&str>) -> Result<String> {
         self.resolve_agent(selected_agent)
             .map(|(_, command)| command)

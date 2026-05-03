@@ -80,7 +80,7 @@ pub struct SessionRecord {
 #[allow(dead_code)]
 pub enum AgentEvent {
     Working,
-    Update(acp::SessionUpdate),
+    Update(Box<acp::SessionUpdate>),
     Finished(String),
     Error(String),
 }

@@ -3,7 +3,6 @@ use similar::TextDiff;
 use telegram_markdown_v2::UnsupportedTagsStrategy;
 
 /// MarkdownV2 formatting utilities for Telegram messages.
-
 /// Convert regular Markdown into Telegram MarkdownV2 using Escape strategy for unsupported tags.
 pub fn markdown_to_telegram_md_v2(markdown: &str) -> String {
     match telegram_markdown_v2::convert_with_strategy(markdown, UnsupportedTagsStrategy::Escape) {
@@ -72,7 +71,9 @@ pub fn format_tool_result(
     output: Option<&str>,
     details: Option<&str>,
 ) -> String {
-    let body = details.or(output).map(|text| truncate_message_tail(text, 1000));
+    let body = details
+        .or(output)
+        .map(|text| truncate_message_tail(text, 1000));
     format_tool_message(name, kind, status, body.as_deref(), 1000)
 }
 
@@ -243,11 +244,7 @@ fn format_tool_message(
     sections.join("\n")
 }
 
-fn format_tool_header_html(
-    name: &str,
-    kind: acp::ToolKind,
-    status: acp::ToolCallStatus,
-) -> String {
+fn format_tool_header_html(name: &str, kind: acp::ToolKind, status: acp::ToolCallStatus) -> String {
     let truncated_name = truncate_message(name, 500);
     let status_icon = match status {
         acp::ToolCallStatus::Pending => "⏳",
@@ -337,9 +334,7 @@ pub fn split_message(text: &str, max_len: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        format_available_commands_html, format_tool_call, markdown_to_telegram_md_v2,
-    };
+    use super::{format_available_commands_html, format_tool_call, markdown_to_telegram_md_v2};
     use agent_client_protocol as acp;
 
     #[test]

@@ -3,8 +3,8 @@ use teloxide::types::ParseMode;
 
 use super::EventContext;
 use crate::formatting;
-use crate::types::AgentEvent;
 use crate::sess_warn;
+use crate::types::AgentEvent;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DraftKind {
@@ -30,20 +30,23 @@ impl DraftHandler {
     /// Returns true if the event was a text chunk (consumed).
     pub async fn handle(&mut self, event: &AgentEvent, ctx: &mut EventContext) -> bool {
         match event {
-            AgentEvent::Update(acp::SessionUpdate::AgentMessageChunk(chunk)) => {
-                let t = extract_text(&chunk.content);
-                if !t.is_empty() {
-                    self.accumulate(&t, DraftKind::AgentMessage, ctx).await;
+            AgentEvent::Update(update) => match update.as_ref() {
+                acp::SessionUpdate::AgentMessageChunk(chunk) => {
+                    let t = extract_text(&chunk.content);
+                    if !t.is_empty() {
+                        self.accumulate(&t, DraftKind::AgentMessage, ctx).await;
+                    }
+                    true
                 }
-                true
-            }
-            AgentEvent::Update(acp::SessionUpdate::AgentThoughtChunk(chunk)) => {
-                let t = extract_text(&chunk.content);
-                if !t.is_empty() {
-                    self.accumulate(&t, DraftKind::AgentThought, ctx).await;
+                acp::SessionUpdate::AgentThoughtChunk(chunk) => {
+                    let t = extract_text(&chunk.content);
+                    if !t.is_empty() {
+                        self.accumulate(&t, DraftKind::AgentThought, ctx).await;
+                    }
+                    true
                 }
-                true
-            }
+                _ => false,
+            },
             _ => false,
         }
     }
@@ -82,7 +85,11 @@ impl DraftHandler {
         });
         d.text.push_str(text);
         if let Err(e) = send_streaming_draft(ctx, d.draft_id, &d.text).await {
-            sess_warn!("Draft message update failed ({} bytes): {}", d.text.len(), e);
+            sess_warn!(
+                "Draft message update failed ({} bytes): {}",
+                d.text.len(),
+                e
+            );
         }
     }
 }

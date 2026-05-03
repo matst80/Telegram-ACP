@@ -87,7 +87,11 @@ impl EventContext {
         }
     }
 
-    async fn request_with_throttle<T, F, Fut>(&mut self, label: &str, mut request: F) -> Result<T, RequestError>
+    async fn request_with_throttle<T, F, Fut>(
+        &mut self,
+        label: &str,
+        mut request: F,
+    ) -> Result<T, RequestError>
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = Result<T, RequestError>>,
@@ -109,7 +113,11 @@ impl EventContext {
         }
     }
 
-    async fn request_with_throttle_drop<T, F, Fut>(&mut self, label: &str, mut request: F) -> Result<Option<T>, RequestError>
+    async fn request_with_throttle_drop<T, F, Fut>(
+        &mut self,
+        label: &str,
+        mut request: F,
+    ) -> Result<Option<T>, RequestError>
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = Result<T, RequestError>>,
@@ -137,12 +145,18 @@ impl EventContext {
             let bot = self.bot.clone();
             let chat_id = self.chat_id;
             let thread_id = self.thread_id;
-            match self.request_with_throttle("sending plain-text fallback message to Telegram", move || {
-                bot.send_message(chat_id, text.clone())
-                    .message_thread_id(ThreadId(MessageId(thread_id)))
-                    .disable_notification(silent)
-                    .send()
-            }).await {
+            match self
+                .request_with_throttle(
+                    "sending plain-text fallback message to Telegram",
+                    move || {
+                        bot.send_message(chat_id, text.clone())
+                            .message_thread_id(ThreadId(MessageId(thread_id)))
+                            .disable_notification(silent)
+                            .send()
+                    },
+                )
+                .await
+            {
                 Ok(message) => Some(message),
                 Err(err) => {
                     sess_warn!("Failed to send plain-text fallback message to Telegram: {err}");
@@ -154,13 +168,16 @@ impl EventContext {
             let chat_id = self.chat_id;
             let thread_id = self.thread_id;
             let text = text.to_string();
-            match self.request_with_throttle("sending HTML message to Telegram", move || {
-                bot.send_message(chat_id, text.clone())
-                    .message_thread_id(ThreadId(MessageId(thread_id)))
-                    .parse_mode(ParseMode::Html)
-                    .disable_notification(silent)
-                    .send()
-            }).await {
+            match self
+                .request_with_throttle("sending HTML message to Telegram", move || {
+                    bot.send_message(chat_id, text.clone())
+                        .message_thread_id(ThreadId(MessageId(thread_id)))
+                        .parse_mode(ParseMode::Html)
+                        .disable_notification(silent)
+                        .send()
+                })
+                .await
+            {
                 Ok(message) => Some(message),
                 Err(err) => {
                     sess_warn!("Failed to send HTML message to Telegram: {err}");
@@ -175,12 +192,18 @@ impl EventContext {
             let bot = self.bot.clone();
             let chat_id = self.chat_id;
             let thread_id = self.thread_id;
-            match self.request_with_throttle_drop("sending plain-text fallback message to Telegram", move || {
-                bot.send_message(chat_id, text.clone())
-                    .message_thread_id(ThreadId(MessageId(thread_id)))
-                    .disable_notification(silent)
-                    .send()
-            }).await {
+            match self
+                .request_with_throttle_drop(
+                    "sending plain-text fallback message to Telegram",
+                    move || {
+                        bot.send_message(chat_id, text.clone())
+                            .message_thread_id(ThreadId(MessageId(thread_id)))
+                            .disable_notification(silent)
+                            .send()
+                    },
+                )
+                .await
+            {
                 Ok(Some(message)) => Some(message),
                 Ok(None) => None,
                 Err(err) => {
@@ -193,13 +216,16 @@ impl EventContext {
             let chat_id = self.chat_id;
             let thread_id = self.thread_id;
             let text = text.to_string();
-            match self.request_with_throttle_drop("sending HTML message to Telegram", move || {
-                bot.send_message(chat_id, text.clone())
-                    .message_thread_id(ThreadId(MessageId(thread_id)))
-                    .parse_mode(ParseMode::Html)
-                    .disable_notification(silent)
-                    .send()
-            }).await {
+            match self
+                .request_with_throttle_drop("sending HTML message to Telegram", move || {
+                    bot.send_message(chat_id, text.clone())
+                        .message_thread_id(ThreadId(MessageId(thread_id)))
+                        .parse_mode(ParseMode::Html)
+                        .disable_notification(silent)
+                        .send()
+                })
+                .await
+            {
                 Ok(Some(message)) => Some(message),
                 Ok(None) => None,
                 Err(err) => {
@@ -254,7 +280,10 @@ impl EventContext {
             let chat_id = self.chat_id;
             match self
                 .request_with_throttle(
-                    &format!("editing Telegram message {} with plain-text fallback", msg_id.0),
+                    &format!(
+                        "editing Telegram message {} with plain-text fallback",
+                        msg_id.0
+                    ),
                     move || bot.edit_message_text(chat_id, msg_id, text.clone()).send(),
                 )
                 .await
@@ -274,11 +303,14 @@ impl EventContext {
             let chat_id = self.chat_id;
             let text = text.to_string();
             match self
-                .request_with_throttle(&format!("editing Telegram message {}", msg_id.0), move || {
-                    bot.edit_message_text(chat_id, msg_id, text.clone())
-                        .parse_mode(ParseMode::Html)
-                        .send()
-                })
+                .request_with_throttle(
+                    &format!("editing Telegram message {}", msg_id.0),
+                    move || {
+                        bot.edit_message_text(chat_id, msg_id, text.clone())
+                            .parse_mode(ParseMode::Html)
+                            .send()
+                    },
+                )
                 .await
             {
                 Ok(_) => true,
@@ -296,7 +328,10 @@ impl EventContext {
             let chat_id = self.chat_id;
             match self
                 .request_with_throttle_drop(
-                    &format!("editing Telegram message {} with plain-text fallback", msg_id.0),
+                    &format!(
+                        "editing Telegram message {} with plain-text fallback",
+                        msg_id.0
+                    ),
                     move || bot.edit_message_text(chat_id, msg_id, text.clone()).send(),
                 )
                 .await
@@ -317,11 +352,14 @@ impl EventContext {
             let chat_id = self.chat_id;
             let text = text.to_string();
             match self
-                .request_with_throttle_drop(&format!("editing Telegram message {}", msg_id.0), move || {
-                    bot.edit_message_text(chat_id, msg_id, text.clone())
-                        .parse_mode(ParseMode::Html)
-                        .send()
-                })
+                .request_with_throttle_drop(
+                    &format!("editing Telegram message {}", msg_id.0),
+                    move || {
+                        bot.edit_message_text(chat_id, msg_id, text.clone())
+                            .parse_mode(ParseMode::Html)
+                            .send()
+                    },
+                )
                 .await
             {
                 Ok(Some(_)) => true,
@@ -338,9 +376,10 @@ impl EventContext {
         let bot = self.bot.clone();
         let chat_id = self.chat_id;
         if let Err(err) = self
-            .request_with_throttle(&format!("deleting Telegram message {}", msg_id.0), move || {
-                bot.delete_message(chat_id, msg_id).send()
-            })
+            .request_with_throttle(
+                &format!("deleting Telegram message {}", msg_id.0),
+                move || bot.delete_message(chat_id, msg_id).send(),
+            )
             .await
         {
             sess_warn!("Failed to delete Telegram message {}: {}", msg_id.0, err);
@@ -351,11 +390,14 @@ impl EventContext {
         let bot = self.bot.clone();
         let chat_id = self.chat_id;
         if let Err(e) = self
-            .request_with_throttle(&format!("pinning Telegram message {}", msg_id.0), move || {
-                bot.pin_chat_message(chat_id, msg_id)
-                    .disable_notification(true)
-                    .send()
-            })
+            .request_with_throttle(
+                &format!("pinning Telegram message {}", msg_id.0),
+                move || {
+                    bot.pin_chat_message(chat_id, msg_id)
+                        .disable_notification(true)
+                        .send()
+                },
+            )
             .await
         {
             sess_warn!("Failed to pin Telegram message {}: {}", msg_id.0, e);
@@ -383,6 +425,7 @@ pub trait EventHandler {
     /// Process an event. Return true if consumed.
     async fn handle(&mut self, event: &AgentEvent, ctx: &mut EventContext) -> bool;
     /// Called when the event stream ends.
+    #[allow(dead_code)]
     async fn finish(&mut self, _ctx: &mut EventContext) {}
     /// Called on turn boundaries (Finished/Error) to reset per-turn state.
     async fn reset(&mut self, _ctx: &mut EventContext) {}

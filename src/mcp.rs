@@ -91,7 +91,8 @@ impl McpServer {
         }
 
         Ok(CallToolResult::success(vec![Content::text(format!(
-            "Topic successfully renamed to: {}", args.name
+            "Topic successfully renamed to: {}",
+            args.name
         ))]))
     }
 
@@ -269,7 +270,14 @@ impl McpSession {
         let (incoming_tx, incoming_rx) = mpsc::unbounded();
         let (outgoing_tx, outgoing_rx) = mpsc::unbounded();
 
-        let server = McpServer::new(bot, telegraph, chat_id, thread_id, project_path, socket_path);
+        let server = McpServer::new(
+            bot,
+            telegraph,
+            chat_id,
+            thread_id,
+            project_path,
+            socket_path,
+        );
         let session_id_for_log = id.clone();
         tokio::task::spawn_local(async move {
             tracing::debug!(session_id = %session_id_for_log, "MCP server task started, waiting for initialize");
