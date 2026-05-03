@@ -62,7 +62,7 @@ pub fn load_topics() -> Vec<PersistedTopic> {
                     last_updated_at: now,
                 };
                 PersistedTopic {
-                    thread_id: s.thread_id,
+                    thread_id: s.thread_id.unwrap_or(0),
                     active_session_id: Some(s.acp_session_id),
                     sessions: vec![record],
                 }

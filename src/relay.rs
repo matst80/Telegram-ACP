@@ -11,28 +11,35 @@ use crate::types::AgentEvent;
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionEvent {
     UserPrompt {
-        thread_id: i32,
+        thread_id: Option<i32>,
         acp_session_id: Option<String>,
         text: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         content: Vec<agent_client_protocol::ContentBlock>,
     },
     AgentUpdate {
-        thread_id: i32,
+        thread_id: Option<i32>,
         acp_session_id: String,
         event: AgentEvent,
     },
     SessionStarted {
-        thread_id: i32,
+        thread_id: Option<i32>,
         acp_session_id: String,
     },
     SessionSwitched {
-        thread_id: i32,
+        thread_id: Option<i32>,
         acp_session_id: String,
     },
     SessionEnded {
-        thread_id: i32,
+        thread_id: Option<i32>,
         acp_session_id: Option<String>,
+    },
+    PermissionRequest {
+        thread_id: Option<i32>,
+        acp_session_id: String,
+        tool: String,
+        args: serde_json::Value,
+        request_id: String,
     },
     Snapshot {
         sessions: Vec<crate::types::SessionInfo>,
@@ -53,21 +60,53 @@ pub trait SessionStateProvider: Send + Sync {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WebSocketCommand {
     SendPrompt {
-        thread_id: i32,
+        #[serde(default)]
+        thread_id: Option<i32>,
+        #[serde(default)]
+        session_id: Option<String>,
         text: String,
     },
     Cancel {
-        thread_id: i32,
+        #[serde(default)]
+        thread_id: Option<i32>,
+        #[serde(default)]
+        session_id: Option<String>,
     },
     SetConfigOption {
-        thread_id: i32,
+        #[serde(default)]
+        thread_id: Option<i32>,
+        #[serde(default)]
+        session_id: Option<String>,
         config_id: String,
         value_id: String,
     },
     SetPermissionMode {
-        thread_id: i32,
+        #[serde(default)]
+        thread_id: Option<i32>,
+        #[serde(default)]
+        session_id: Option<String>,
         mode_id: String,
     },
+    SpawnSession {
+        project_path: String,
+        #[serde(default)]
+        agent_command: Option<String>,
+        #[serde(default)]
+        thread_id: Option<i32>,
+        #[serde(default)]
+        metadata: Option<serde_json::Value>,
+    },
+    EndSession {
+        #[serde(default)]
+        session_id: Option<String>,
+        #[serde(default)]
+        thread_id: Option<i32>,
+    },
+    PermissionResponse {
+        request_id: String,
+        decision: String,
+    },
+    ListSessions,
 }
 
 #[async_trait]
@@ -213,7 +252,7 @@ mod tests {
         let composite = MultiSessionEventSink::new(vec![sink1, sink2]);
 
         let test_event = SessionEvent::SessionStarted {
-            thread_id: 42,
+            thread_id: Some(42),
             acp_session_id: "test-session-id".to_string(),
         };
 
@@ -229,9 +268,10 @@ mod tests {
 
         for i in 0..5 {
             sink.publish(SessionEvent::UserPrompt {
-                thread_id: 1,
+                thread_id: Some(1),
                 acp_session_id: None,
                 text: format!("msg {}", i),
+                content: Vec::new(),
             })
             .await;
         }

@@ -198,9 +198,9 @@ pub async fn run_session_runtime(
                         sess_info!("Prompt finished: {}", reason);
                         let event = AgentEvent::Finished { content: reason };
                         let _ = event_tx.send(event.clone());
-                        event_sink
+                         event_sink
                             .publish(SessionEvent::AgentUpdate {
-                                thread_id,
+                                thread_id: if thread_id > 0 { Some(thread_id) } else { None },
                                 acp_session_id: acp_session_id.to_string(),
                                 event,
                             })
@@ -212,7 +212,7 @@ pub async fn run_session_runtime(
                         let _ = event_tx.send(event.clone());
                         event_sink
                             .publish(SessionEvent::AgentUpdate {
-                                thread_id,
+                                thread_id: if thread_id > 0 { Some(thread_id) } else { None },
                                 acp_session_id: acp_session_id.to_string(),
                                 event,
                             })
@@ -270,7 +270,7 @@ async fn start_prompt(
     let _ = event_tx.send(AgentEvent::Working);
     event_sink
         .publish(SessionEvent::AgentUpdate {
-            thread_id,
+            thread_id: if thread_id > 0 { Some(thread_id) } else { None },
             acp_session_id: acp_session_id.to_string(),
             event: AgentEvent::Working,
         })

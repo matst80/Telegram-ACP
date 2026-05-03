@@ -127,7 +127,7 @@ async fn handle_topic_message(
     daemon
         .session_event_sink
         .publish(SessionEvent::UserPrompt {
-            thread_id: thread,
+            thread_id: Some(thread),
             acp_session_id: daemon.get_acp_session_id_by_thread(thread),
             text,
             content: content.clone(),

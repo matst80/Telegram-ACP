@@ -143,7 +143,7 @@ async fn main() -> anyhow::Result<()> {
                                 s.acp_session_id,
                                 s.project_path.display(),
                                 s.status,
-                                s.thread_id
+                                s.thread_id.map(|id| id.to_string()).unwrap_or_else(|| "headless".to_string())
                             );
                         }
                     }

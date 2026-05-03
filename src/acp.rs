@@ -72,7 +72,7 @@ impl TelegramClient {
         let _ = self.event_tx.send(event.clone());
         self.event_sink
             .publish(SessionEvent::AgentUpdate {
-                thread_id: self.thread_id,
+                thread_id: if self.thread_id > 0 { Some(self.thread_id) } else { None },
                 acp_session_id: session_id.to_string(),
                 event,
             })
@@ -119,45 +119,61 @@ impl acp::Client for TelegramClient {
         let (tx, rx) = oneshot::channel();
         self.pending_permissions.insert(request_id.clone(), tx);
 
-        let mut rows = Vec::new();
-        for option in &args.options {
-            let label = option.name.clone();
-            let data = format!("approve:{}:{}", request_id, option.option_id.0);
-            rows.push(vec![InlineKeyboardButton::callback(label, data)]);
-        }
-
-        let keyboard = InlineKeyboardMarkup::new(rows);
         let title = args
             .tool_call
             .fields
             .title
             .as_deref()
             .unwrap_or("Tool Call");
-        let content = args.tool_call.fields.content.as_deref().unwrap_or(&[]);
-        let text = format!(
-            "<b>Permission Requested: {}</b>\n\n{}",
-            formatting::escape_html(title),
-            formatting::format_tool_content(content)
-        );
 
-        let sent = self
-            .bot
-            .send_message(self.chat_id, text)
-            .message_thread_id(ThreadId(MessageId(self.thread_id)))
-            .parse_mode(ParseMode::Html)
-            .reply_markup(keyboard)
-            .await
-            .map_err(|e| {
-                acp::Error::new(-32000, format!("Failed to send permission request: {e}"))
-            })?;
+        self.event_sink.publish(SessionEvent::PermissionRequest {
+            thread_id: if self.thread_id > 0 { Some(self.thread_id) } else { None },
+            acp_session_id: args.session_id.to_string(),
+            tool: title.to_string(),
+            args: serde_json::to_value(&args.tool_call.fields.content).unwrap_or(serde_json::Value::Null),
+            request_id: request_id.clone(),
+        }).await;
+
+        let sent_msg = if self.thread_id > 0 {
+            let mut rows = Vec::new();
+            for option in &args.options {
+                let label = option.name.clone();
+                let data = format!("approve:{}:{}", request_id, option.option_id.0);
+                rows.push(vec![InlineKeyboardButton::callback(label, data)]);
+            }
+
+            let keyboard = InlineKeyboardMarkup::new(rows);
+            let content = args.tool_call.fields.content.as_deref().unwrap_or(&[]);
+            let text = format!(
+                "<b>Permission Requested: {}</b>\n\n{}",
+                formatting::escape_html(title),
+                formatting::format_tool_content(content)
+            );
+
+            let sent = self
+                .bot
+                .send_message(self.chat_id, text)
+                .message_thread_id(ThreadId(MessageId(self.thread_id)))
+                .parse_mode(ParseMode::Html)
+                .reply_markup(keyboard)
+                .await
+                .map_err(|e| {
+                    acp::Error::new(-32000, format!("Failed to send permission request: {e}"))
+                })?;
+            Some(sent)
+        } else {
+            None
+        };
 
         match rx.await {
             Ok(option_id) => {
-                let _ = self
-                    .bot
-                    .edit_message_reply_markup(self.chat_id, sent.id)
-                    .reply_markup(InlineKeyboardMarkup::default())
-                    .await;
+                if let Some(sent) = sent_msg {
+                    let _ = self
+                        .bot
+                        .edit_message_reply_markup(self.chat_id, sent.id)
+                        .reply_markup(InlineKeyboardMarkup::default())
+                        .await;
+                }
 
                 Ok(acp::RequestPermissionResponse::new(
                     acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(
@@ -166,14 +182,16 @@ impl acp::Client for TelegramClient {
                 ))
             }
             Err(_) => {
-                let _ = self
-                    .bot
-                    .edit_message_text(
-                        self.chat_id,
-                        sent.id,
-                        "Permission request cancelled or timed out.",
-                    )
-                    .await;
+                if let Some(sent) = sent_msg {
+                    let _ = self
+                        .bot
+                        .edit_message_text(
+                            self.chat_id,
+                            sent.id,
+                            "Permission request cancelled or timed out.",
+                        )
+                        .await;
+                }
                 Err(acp::Error::new(-32000, "Permission request cancelled"))
             }
         }

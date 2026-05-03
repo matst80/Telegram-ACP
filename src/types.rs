@@ -43,7 +43,7 @@ pub struct SessionInfo {
     pub acp_session_id: String,
     pub project_path: PathBuf,
     pub status: SessionStatus,
-    pub thread_id: i32,
+    pub thread_id: Option<i32>,
     pub agent_command: String,
     pub agent_name: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

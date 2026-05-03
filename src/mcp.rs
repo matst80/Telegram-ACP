@@ -27,7 +27,7 @@ struct McpServer {
     bot: Bot,
     telegraph: Arc<telegraph_rs::Telegraph>,
     chat_id: ChatId,
-    thread_id: i32,
+    thread_id: Option<i32>,
     project_path: PathBuf,
     socket_path: PathBuf,
     tool_router: ToolRouter<McpServer>,
@@ -76,7 +76,14 @@ impl McpServer {
         &self,
         Parameters(args): Parameters<RenameTopicArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let thread_id = ThreadId(MessageId(self.thread_id));
+        let Some(tid) = self.thread_id else {
+            return Err(ErrorData::new(
+                ErrorCode::INVALID_PARAMS,
+                "No Telegram thread associated with this session",
+                None,
+            ));
+        };
+        let thread_id = ThreadId(MessageId(tid));
         if let Err(e) = self
             .bot
             .edit_forum_topic(self.chat_id, thread_id)
@@ -150,7 +157,10 @@ impl McpServer {
             .await
             .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, e.to_string(), None))?;
 
-        let thread_id = ThreadId(MessageId(self.thread_id));
+        let Some(tid) = self.thread_id else {
+            return Ok(CallToolResult::success(vec![Content::text(url)]));
+        };
+        let thread_id = ThreadId(MessageId(tid));
         if let Err(e) = self
             .bot
             .send_message(self.chat_id, format!("Telegraph: {url}"))
@@ -175,7 +185,14 @@ impl McpServer {
     ) -> Result<CallToolResult, ErrorData> {
         let (input, filename) = build_input_file(&self.project_path, &args.path)?;
 
-        let thread_id = ThreadId(MessageId(self.thread_id));
+        let Some(tid) = self.thread_id else {
+            return Err(ErrorData::new(
+                ErrorCode::INVALID_PARAMS,
+                "No Telegram thread associated with this session",
+                None,
+            ));
+        };
+        let thread_id = ThreadId(MessageId(tid));
         let mut request = self
             .bot
             .send_document(self.chat_id, input)
@@ -200,7 +217,14 @@ impl McpServer {
     ) -> Result<CallToolResult, ErrorData> {
         let (input, filename) = build_input_file(&self.project_path, &args.path)?;
 
-        let thread_id = ThreadId(MessageId(self.thread_id));
+        let Some(tid) = self.thread_id else {
+            return Err(ErrorData::new(
+                ErrorCode::INVALID_PARAMS,
+                "No Telegram thread associated with this session",
+                None,
+            ));
+        };
+        let thread_id = ThreadId(MessageId(tid));
         let mut request = self
             .bot
             .send_photo(self.chat_id, input)
@@ -235,7 +259,7 @@ impl McpServer {
         bot: Bot,
         telegraph: Arc<telegraph_rs::Telegraph>,
         chat_id: ChatId,
-        thread_id: i32,
+        thread_id: Option<i32>,
         project_path: PathBuf,
         socket_path: PathBuf,
     ) -> Self {
@@ -262,7 +286,7 @@ impl McpSession {
         bot: Bot,
         telegraph: Arc<telegraph_rs::Telegraph>,
         chat_id: ChatId,
-        thread_id: i32,
+        thread_id: Option<i32>,
         project_path: PathBuf,
         socket_path: PathBuf,
     ) -> Result<Self> {
