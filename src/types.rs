@@ -45,6 +45,9 @@ pub struct SessionInfo {
     pub status: SessionStatus,
     pub thread_id: i32,
     pub agent_command: String,
+    pub agent_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history: Vec<crate::relay::SessionEvent>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,7 +78,7 @@ pub struct SessionRecord {
 
 // === Agent Events (sent from ACP Client impl to Telegram sender) ===
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[allow(dead_code)]
 pub enum AgentEvent {

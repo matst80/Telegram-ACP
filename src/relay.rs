@@ -1,12 +1,13 @@
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use serde::Serialize;
-use tokio::sync::{broadcast, mpsc};
+use serde::{Deserialize, Serialize};
+use tokio::sync::{broadcast, mpsc, Mutex};
 
 use crate::types::AgentEvent;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionEvent {
     UserPrompt {
@@ -31,11 +32,45 @@ pub enum SessionEvent {
         thread_id: i32,
         acp_session_id: Option<String>,
     },
+    Snapshot {
+        sessions: Vec<crate::types::SessionInfo>,
+    },
 }
 
 #[async_trait]
 pub trait SessionEventSink: Send + Sync {
     async fn publish(&self, event: SessionEvent);
+}
+
+#[async_trait]
+pub trait SessionStateProvider: Send + Sync {
+    async fn get_snapshot(&self) -> Vec<SessionEvent>;
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum WebSocketCommand {
+    SendPrompt {
+        thread_id: i32,
+        text: String,
+    },
+    Cancel {
+        thread_id: i32,
+    },
+    SetConfigOption {
+        thread_id: i32,
+        config_id: String,
+        value_id: String,
+    },
+    SetPermissionMode {
+        thread_id: i32,
+        mode_id: String,
+    },
+}
+
+#[async_trait]
+pub trait WebSocketCommandHandler: Send + Sync {
+    async fn handle_command(&self, command: WebSocketCommand) -> anyhow::Result<()>;
 }
 
 pub struct NoopSessionEventSink;
@@ -61,6 +96,40 @@ impl SessionEventSink for MultiSessionEventSink {
         for sink in &self.sinks {
             sink.publish(event.clone()).await;
         }
+    }
+}
+
+pub struct HistorySessionEventSink {
+    history: Arc<Mutex<VecDeque<SessionEvent>>>,
+    limit: usize,
+}
+
+impl HistorySessionEventSink {
+    pub fn new(limit: usize) -> (Self, Arc<Mutex<VecDeque<SessionEvent>>>) {
+        let history = Arc::new(Mutex::new(VecDeque::with_capacity(limit)));
+        (
+            Self {
+                history: history.clone(),
+                limit,
+            },
+            history,
+        )
+    }
+}
+
+#[async_trait]
+impl SessionEventSink for HistorySessionEventSink {
+    async fn publish(&self, event: SessionEvent) {
+        // Don't record snapshots in history
+        if matches!(event, SessionEvent::Snapshot { .. }) {
+            return;
+        }
+
+        let mut history = self.history.lock().await;
+        if history.len() >= self.limit {
+            history.pop_front();
+        }
+        history.push_back(event);
     }
 }
 
@@ -150,5 +219,32 @@ mod tests {
 
         assert_eq!(list1.lock().await.len(), 1);
         assert_eq!(list2.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn history_sink_limits_events() {
+        let (sink, history) = HistorySessionEventSink::new(3);
+
+        for i in 0..5 {
+            sink.publish(SessionEvent::UserPrompt {
+                thread_id: 1,
+                acp_session_id: None,
+                text: format!("msg {}", i),
+            })
+            .await;
+        }
+
+        let h = history.lock().await;
+        assert_eq!(h.len(), 3);
+        if let SessionEvent::UserPrompt { text, .. } = &h[0] {
+            assert_eq!(text, "msg 2");
+        } else {
+            panic!("wrong event type");
+        }
+        if let SessionEvent::UserPrompt { text, .. } = &h[2] {
+            assert_eq!(text, "msg 4");
+        } else {
+            panic!("wrong event type");
+        }
     }
 }

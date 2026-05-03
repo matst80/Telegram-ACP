@@ -22,7 +22,7 @@ use crate::mcp;
 use crate::persistence::{self, PersistedTopic};
 use crate::relay::{
     BroadcastSessionEventSink, MultiSessionEventSink, NoopSessionEventSink, SessionEvent,
-    SessionEventSink,
+    SessionEventSink, SessionStateProvider,
 };
 use crate::session;
 use crate::session_control::{self, SessionCommand};
@@ -44,6 +44,78 @@ pub struct DaemonHandle {
     /// thread_id -> TopicEntry
     pub topics: DashMap<i32, TopicEntry>,
     pub pending_permissions: Arc<DashMap<String, oneshot::Sender<acp_sdk::PermissionOptionId>>>,
+}
+
+#[async_trait::async_trait]
+impl SessionStateProvider for DaemonHandle {
+    async fn get_snapshot(&self) -> Vec<SessionEvent> {
+        let mut sessions = Vec::new();
+        for entry in self.topics.iter() {
+            let thread_id = *entry.key();
+            let topic = entry.value();
+            if let Some(active) = &topic.active {
+                let status = *active.status.lock().await;
+                let history = active.history.lock().await.iter().cloned().collect();
+                if let Some(acp_session_id) = active.acp_session_id.clone() {
+                    sessions.push(crate::types::SessionInfo {
+                        acp_session_id,
+                        project_path: active.project_path.clone(),
+                        agent_command: active.agent_command.clone(),
+                        agent_name: active.agent_name.clone(),
+                        status,
+                        thread_id,
+                        history,
+                    });
+                }
+            }
+        }
+        vec![SessionEvent::Snapshot { sessions }]
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::relay::WebSocketCommandHandler for DaemonHandle {
+    async fn handle_command(&self, command: crate::relay::WebSocketCommand) -> anyhow::Result<()> {
+        match command {
+            crate::relay::WebSocketCommand::SendPrompt { thread_id, text } => {
+                let tx = self
+                    .get_session_command_tx_by_thread(thread_id)
+                    .ok_or_else(|| anyhow::anyhow!("No active session for thread {}", thread_id))?;
+                tx.send(SessionCommand::Prompt(text))
+                    .map_err(|_| anyhow::anyhow!("Failed to send prompt to session"))?;
+            }
+            crate::relay::WebSocketCommand::Cancel { thread_id } => {
+                self.cancel_session(thread_id).await?;
+            }
+            crate::relay::WebSocketCommand::SetConfigOption {
+                thread_id,
+                config_id,
+                value_id,
+            } => {
+                let tx = self
+                    .get_session_command_tx_by_thread(thread_id)
+                    .ok_or_else(|| anyhow::anyhow!("No active session for thread {}", thread_id))?;
+                let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+                tx.send(SessionCommand::SetConfigOption {
+                    config_id,
+                    value_id,
+                    result_tx,
+                })
+                .map_err(|_| anyhow::anyhow!("Failed to send config change to session"))?;
+                result_rx.await??;
+            }
+            crate::relay::WebSocketCommand::SetPermissionMode { thread_id, mode_id } => {
+                let tx = self
+                    .get_session_command_tx_by_thread(thread_id)
+                    .ok_or_else(|| anyhow::anyhow!("No active session for thread {}", thread_id))?;
+                let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+                tx.send(SessionCommand::SetPermissionMode { mode_id, result_tx })
+                    .map_err(|_| anyhow::anyhow!("Failed to send permission change to session"))?;
+                result_rx.await??;
+            }
+        }
+        Ok(())
+    }
 }
 
 pub struct TopicEntry {
@@ -68,6 +140,7 @@ pub struct SessionEntry {
     pub permission_handling: Arc<std::sync::Mutex<crate::types::PermissionHandling>>,
     pub command_tx: mpsc::UnboundedSender<SessionCommand>,
     pub cancel_tx: mpsc::UnboundedSender<oneshot::Sender<Result<()>>>,
+    pub history: Arc<tokio::sync::Mutex<std::collections::VecDeque<SessionEvent>>>,
 }
 
 struct StartSessionRequest {
@@ -461,10 +534,13 @@ impl DaemonHandle {
         let (cancel_tx, cancel_rx) = mpsc::unbounded_channel::<oneshot::Sender<Result<()>>>();
         let (event_tx, event_rx) = mpsc::unbounded_channel::<AgentEvent>();
         let available_commands = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let (history_sink, history) =
+            crate::relay::HistorySessionEventSink::new(self.config.websocket_history_limit);
         let session_event_sink: Arc<dyn SessionEventSink> =
-            Arc::new(MultiSessionEventSink::new(vec![self
-                .session_event_sink
-                .clone()]));
+            Arc::new(MultiSessionEventSink::new(vec![
+                self.session_event_sink.clone(),
+                Arc::new(history_sink),
+            ]));
         let resumed_session = existing_acp_session_id.is_some();
 
         let status = Arc::new(tokio::sync::Mutex::new(SessionStatus::Initializing));
@@ -531,6 +607,7 @@ impl DaemonHandle {
             permission_handling: permission_handling.clone(),
             command_tx: command_tx.clone(),
             cancel_tx: cancel_tx.clone(),
+            history: history.clone(),
         };
         self.topics
             .entry(thread_id)
@@ -975,6 +1052,8 @@ pub async fn run_daemon(config: Config) -> Result<()> {
 
     if let Some(bind_addr) = config.websocket_bind.clone() {
         let websocket_events = websocket_events.expect("websocket sink missing");
+        let state_provider = daemon.clone() as Arc<dyn SessionStateProvider>;
+        let command_handler = daemon.clone() as Arc<dyn crate::relay::WebSocketCommandHandler>;
         let _mdns = if let Ok(addr) = bind_addr.parse::<std::net::SocketAddr>() {
             match crate::websocket::advertise_service(addr.port()) {
                 Ok(mdns) => {
@@ -992,7 +1071,14 @@ pub async fn run_daemon(config: Config) -> Result<()> {
 
         tokio::task::spawn_local(async move {
             let _keep_alive = _mdns;
-            if let Err(err) = crate::websocket::run_server(&bind_addr, websocket_events).await {
+            if let Err(err) = crate::websocket::run_server(
+                &bind_addr,
+                websocket_events,
+                state_provider,
+                command_handler,
+            )
+            .await
+            {
                 tracing::error!("Websocket server error: {err}");
             }
         });
@@ -1063,13 +1149,16 @@ pub async fn run_daemon(config: Config) -> Result<()> {
                             let topic = entry.value();
                             if let Some(active) = &topic.active {
                                 let status = *active.status.lock().await;
+                                let history = active.history.lock().await.iter().cloned().collect();
                                 if let Some(acp_session_id) = active.acp_session_id.clone() {
                                     sessions.push(crate::types::SessionInfo {
                                         acp_session_id,
                                         project_path: active.project_path.clone(),
                                         agent_command: active.agent_command.clone(),
+                                        agent_name: active.agent_name.clone(),
                                         status,
                                         thread_id,
+                                        history,
                                     });
                                 }
                             }

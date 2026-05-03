@@ -14,6 +14,7 @@ pub struct Config {
     pub websocket_bind: Option<String>,
     pub default_agent: String,
     pub agents: HashMap<String, String>,
+    pub websocket_history_limit: usize,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -24,6 +25,7 @@ struct FileConfig {
     telegraph_author_url: Option<String>,
     socket_path: Option<PathBuf>,
     websocket_bind: Option<String>,
+    websocket_history_limit: Option<usize>,
     default_agent: Option<String>,
     #[serde(flatten)]
     extra_tables: HashMap<String, toml::Table>,
@@ -63,6 +65,12 @@ impl Config {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/tmp/telegram-acp.sock"));
         let websocket_bind = env_or("TELEGRAM_ACP_WEBSOCKET_BIND", file_config.websocket_bind);
+        let websocket_history_limit = env_or(
+            "TELEGRAM_ACP_WEBSOCKET_HISTORY_LIMIT",
+            file_config.websocket_history_limit.map(|l| l.to_string()),
+        )
+        .and_then(|l| l.parse().ok())
+        .unwrap_or(20);
 
         let agents = parse_agents(&file_config.extra_tables);
         let default_agent = env_or("TELEGRAM_ACP_DEFAULT_AGENT", file_config.default_agent)
@@ -94,6 +102,7 @@ impl Config {
             websocket_bind,
             default_agent,
             agents,
+            websocket_history_limit,
         })
     }
 

@@ -8,18 +8,26 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
+use crate::relay::{BroadcastSessionEventSink, SessionStateProvider, WebSocketCommand, WebSocketCommandHandler};
 
-use crate::relay::BroadcastSessionEventSink;
-
-pub async fn run_server(bind_addr: &str, events: Arc<BroadcastSessionEventSink>) -> Result<()> {
+pub async fn run_server(
+    bind_addr: &str,
+    events: Arc<BroadcastSessionEventSink>,
+    state_provider: Arc<dyn SessionStateProvider>,
+    command_handler: Arc<dyn WebSocketCommandHandler>,
+) -> Result<()> {
     let listener = TcpListener::bind(bind_addr).await?;
     tracing::info!(bind_addr, "Websocket listener started");
 
     loop {
         let (stream, peer_addr) = listener.accept().await?;
         let events = events.clone();
+        let state_provider = state_provider.clone();
+        let command_handler = command_handler.clone();
         tokio::spawn(async move {
-            if let Err(err) = handle_connection(stream, events.subscribe()).await {
+            if let Err(err) =
+                handle_connection(stream, events.subscribe(), state_provider, command_handler).await
+            {
                 tracing::warn!(peer = %peer_addr, "Websocket listener closed: {err}");
             }
         });
@@ -29,9 +37,17 @@ pub async fn run_server(bind_addr: &str, events: Arc<BroadcastSessionEventSink>)
 async fn handle_connection(
     stream: TcpStream,
     mut events: broadcast::Receiver<String>,
+    state_provider: Arc<dyn SessionStateProvider>,
+    command_handler: Arc<dyn WebSocketCommandHandler>,
 ) -> Result<()> {
     let websocket = accept_async(stream).await?;
     let (mut writer, mut reader) = websocket.split();
+
+    // Send initial snapshot
+    for event in state_provider.get_snapshot().await {
+        let payload = serde_json::to_string(&event)?;
+        writer.send(Message::Text(payload)).await?;
+    }
 
     loop {
         tokio::select! {
@@ -48,6 +64,19 @@ async fn handle_connection(
                 Some(Ok(Message::Close(_))) | None => break,
                 Some(Ok(Message::Ping(payload))) => {
                     writer.send(Message::Pong(payload)).await?;
+                }
+                Some(Ok(Message::Text(text))) => {
+                    match serde_json::from_str::<WebSocketCommand>(&text) {
+                        Ok(cmd) => {
+                            if let Err(err) = command_handler.handle_command(cmd).await {
+                                tracing::warn!("Failed to handle websocket command: {err}");
+                                // Optionally send error back to client
+                            }
+                        }
+                        Err(err) => {
+                            tracing::warn!("Failed to parse websocket command: {err}");
+                        }
+                    }
                 }
                 Some(Ok(_)) => {}
                 Some(Err(err)) => return Err(err.into()),
