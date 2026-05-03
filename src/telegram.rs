@@ -45,6 +45,15 @@ async fn handle_message(bot: Bot, msg: Message, daemon: Arc<DaemonHandle>) -> an
         return Ok(());
     }
 
+    if msg.date < daemon.start_time {
+        tracing::debug!(
+            "Skipping old message sent at {} (daemon started at {})",
+            msg.date,
+            daemon.start_time
+        );
+        return Ok(());
+    }
+
     if commands::execute_slash_command(&bot, &msg, &daemon).await? {
         return Ok(());
     }

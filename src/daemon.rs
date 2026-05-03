@@ -38,6 +38,7 @@ pub struct DaemonHandle {
     #[allow(dead_code)]
     pub telegraph: Arc<Telegraph>,
     pub session_event_sink: Arc<dyn SessionEventSink>,
+    pub start_time: chrono::DateTime<chrono::Utc>,
     /// Relay for starting ACP sessions inside the daemon's LocalSet task.
     local_start_tx: mpsc::UnboundedSender<StartSessionRequest>,
     /// thread_id -> TopicEntry
@@ -837,13 +838,13 @@ async fn init_agent(
             if let Err(e) = handle_io.await {
                 sess_error!("ACP IO error: {e}");
                 let message = format!("Agent connection error: {e}");
-                let _ = io_event_tx.send(AgentEvent::Error(message.clone()));
+                let _ = io_event_tx.send(AgentEvent::Error { content: message.clone() });
                 if let Some(acp_session_id) = session_id_rx.borrow().clone() {
                     io_event_sink
                         .publish(SessionEvent::AgentUpdate {
                             thread_id,
                             acp_session_id,
-                            event: AgentEvent::Error(message),
+                            event: AgentEvent::Error { content: message },
                         })
                         .await;
                 }
@@ -854,13 +855,13 @@ async fn init_agent(
             if let Err(e) = handle_io.await {
                 tracing::error!("ACP IO error: {e}");
                 let message = format!("Agent connection error: {e}");
-                let _ = io_event_tx.send(AgentEvent::Error(message.clone()));
+                let _ = io_event_tx.send(AgentEvent::Error { content: message.clone() });
                 if let Some(acp_session_id) = session_id_rx.borrow().clone() {
                     io_event_sink
                         .publish(SessionEvent::AgentUpdate {
                             thread_id,
                             acp_session_id,
-                            event: AgentEvent::Error(message),
+                            event: AgentEvent::Error { content: message },
                         })
                         .await;
                 }
@@ -966,6 +967,7 @@ pub async fn run_daemon(config: Config) -> Result<()> {
         bot: bot.clone(),
         telegraph,
         session_event_sink,
+        start_time: chrono::Utc::now(),
         local_start_tx,
         topics: DashMap::new(),
         pending_permissions: Arc::new(DashMap::new()),

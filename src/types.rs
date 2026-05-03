@@ -81,6 +81,6 @@ pub struct SessionRecord {
 pub enum AgentEvent {
     Working,
     Update(Box<acp::SessionUpdate>),
-    Finished(String),
-    Error(String),
+    Finished { content: String },
+    Error { content: String },
 }

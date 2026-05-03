@@ -196,7 +196,7 @@ pub async fn run_session_runtime(
                 match maybe_done {
                     Some(PromptOutcome::Finished(reason)) => {
                         sess_info!("Prompt finished: {}", reason);
-                        let event = AgentEvent::Finished(reason);
+                        let event = AgentEvent::Finished { content: reason };
                         let _ = event_tx.send(event.clone());
                         event_sink
                             .publish(SessionEvent::AgentUpdate {
@@ -208,7 +208,7 @@ pub async fn run_session_runtime(
                     }
                     Some(PromptOutcome::Error(err)) => {
                         sess_error!("Prompt failed: {}", err);
-                        let event = AgentEvent::Error(err);
+                        let event = AgentEvent::Error { content: err };
                         let _ = event_tx.send(event.clone());
                         event_sink
                             .publish(SessionEvent::AgentUpdate {
@@ -220,7 +220,7 @@ pub async fn run_session_runtime(
                     }
                     None => {
                         sess_error!("Prompt runner closed unexpectedly");
-                        let _ = event_tx.send(AgentEvent::Error("Prompt runner closed unexpectedly".to_string()));
+                        let _ = event_tx.send(AgentEvent::Error { content: "Prompt runner closed unexpectedly".to_string() });
                     }
                 }
 
@@ -413,13 +413,13 @@ pub async fn run_event_consumer(
                     // ctx.send_html_chunks(&text, true).await;
                 }
             }
-            AgentEvent::Finished(reason) => {
-                ctx.send_html_chunks(&formatting::format_completion(&reason, None), false)
+            AgentEvent::Finished { content } => {
+                ctx.send_html_chunks(&formatting::format_completion(&content, None), false)
                     .await;
                 tool_call.reset(&mut ctx).await;
             }
-            AgentEvent::Error(e) => {
-                ctx.send_html_chunks(&formatting::format_error(&e), false)
+            AgentEvent::Error { content } => {
+                ctx.send_html_chunks(&formatting::format_error(&content), false)
                     .await;
                 tool_call.reset(&mut ctx).await;
             }
