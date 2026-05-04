@@ -156,7 +156,17 @@ fn get_local_ip() -> String {
 pub fn advertise_service(port: u16) -> Result<ServiceDaemon> {
     let mdns = ServiceDaemon::new()?;
     let service_type = "_acp-ws._tcp.local.";
-    let instance_name = format!("acp-ws-{}", port);
+    let raw_hostname = if let Ok(output) = std::process::Command::new("hostname").output() {
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    } else {
+        "localhost".to_string()
+    };
+    let normalized = raw_hostname
+        .to_lowercase()
+        .replace(".local", "")
+        .replace('.', "-")
+        .replace(' ', "-");
+    let instance_name = format!("{}-{}", normalized, port);
     let mut properties = HashMap::new();
     properties.insert("version".to_string(), "1.0".to_string());
     properties.insert("auth".to_string(), "bearer".to_string());
