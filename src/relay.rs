@@ -89,7 +89,7 @@ pub enum WebSocketCommand {
     },
     SpawnSession {
         project_path: String,
-        #[serde(default)]
+        #[serde(default, alias = "agent")]
         agent_command: Option<String>,
         #[serde(default)]
         thread_id: Option<i32>,
@@ -105,6 +105,12 @@ pub enum WebSocketCommand {
     PermissionResponse {
         request_id: String,
         decision: String,
+    },
+    BindTelegramThread {
+        #[serde(default)]
+        session_id: Option<String>,
+        #[serde(default)]
+        thread_id: Option<i32>,
     },
     ListSessions,
 }
@@ -287,6 +293,37 @@ mod tests {
             assert_eq!(text, "msg 4");
         } else {
             panic!("wrong event type");
+        }
+    }
+
+    #[test]
+    fn spawn_session_deserialization_with_agent_alias() {
+        let json_with_agent = r#"{
+            "type": "spawn_session",
+            "project_path": "/Users/mats/some-project",
+            "agent": "copilot",
+            "thread_id": 42
+        }"#;
+
+        let cmd: WebSocketCommand = serde_json::from_str(json_with_agent).unwrap();
+        if let WebSocketCommand::SpawnSession { agent_command, .. } = cmd {
+            assert_eq!(agent_command, Some("copilot".to_string()));
+        } else {
+            panic!("wrong command variant");
+        }
+
+        let json_with_agent_command = r#"{
+            "type": "spawn_session",
+            "project_path": "/Users/mats/some-project",
+            "agent_command": "copilot",
+            "thread_id": 42
+        }"#;
+
+        let cmd2: WebSocketCommand = serde_json::from_str(json_with_agent_command).unwrap();
+        if let WebSocketCommand::SpawnSession { agent_command, .. } = cmd2 {
+            assert_eq!(agent_command, Some("copilot".to_string()));
+        } else {
+            panic!("wrong command variant");
         }
     }
 }

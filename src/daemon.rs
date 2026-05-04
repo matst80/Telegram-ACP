@@ -38,7 +38,7 @@ pub struct DaemonHandle {
     #[allow(dead_code)]
     pub telegraph: Arc<Telegraph>,
     pub session_event_sink: Arc<dyn SessionEventSink>,
-    pub start_time: chrono::DateTime<chrono::Utc>,
+    pub start_time: std::sync::atomic::AtomicI64,
     /// Relay for starting ACP sessions inside the daemon's LocalSet task.
     local_start_tx: mpsc::UnboundedSender<StartSessionRequest>,
     /// thread_id -> TopicEntry
@@ -182,6 +182,49 @@ impl crate::relay::WebSocketCommandHandler for DaemonHandle {
                     let _ = tx.send(agent_client_protocol::PermissionOptionId::new(decision));
                 }
             }
+            crate::relay::WebSocketCommand::BindTelegramThread { session_id, thread_id } => {
+                let sid = session_id.ok_or_else(|| anyhow::anyhow!("session_id required"))?;
+                let mut old_key = None;
+                for entry in self.topics.iter() {
+                    if let Some(active) = &entry.value().active {
+                        if active.acp_session_id.as_deref() == Some(&sid) {
+                            old_key = Some(*entry.key());
+                            break;
+                        }
+                    }
+                }
+                let okey = old_key.ok_or_else(|| anyhow::anyhow!("No active session found"))?;
+
+                let resolved_tid = match thread_id {
+                    Some(tid) if tid > 0 => tid,
+                    _ => {
+                        let folder_name = {
+                            let topics = self.topics.get(&okey).unwrap();
+                            let active = topics.active.as_ref().unwrap();
+                            active.project_path
+                                .file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_else(|| "project".to_string())
+                        };
+                        let topic_name = format!("{}: {}", folder_name, Self::generate_two_words());
+                        let topic = self.bot
+                            .create_forum_topic(ChatId(self.config.chat_id), &topic_name)
+                            .icon_color(teloxide::types::Rgb::from_u32(0x6FB9F0))
+                            .await?;
+                        topic.thread_id.0 .0
+                    }
+                };
+
+                if let Some((_, mut topic_entry)) = self.topics.remove(&okey) {
+                    if let Some(mut active) = topic_entry.active.take() {
+                        active.telegram_thread_id.store(resolved_tid, std::sync::atomic::Ordering::Relaxed);
+                        self.topics.entry(resolved_tid).or_insert_with(|| TopicEntry {
+                            active: None,
+                            history: Vec::new(),
+                        }).active = Some(active);
+                    }
+                }
+            }
             crate::relay::WebSocketCommand::ListSessions => {
                 use crate::relay::SessionStateProvider;
                 let snapshot = self.get_snapshot().await;
@@ -217,6 +260,7 @@ pub struct SessionEntry {
     pub command_tx: mpsc::UnboundedSender<SessionCommand>,
     pub cancel_tx: mpsc::UnboundedSender<oneshot::Sender<Result<()>>>,
     pub history: Arc<tokio::sync::Mutex<std::collections::VecDeque<SessionEvent>>>,
+    pub telegram_thread_id: Arc<std::sync::atomic::AtomicI32>,
 }
 
 struct StartSessionRequest {
@@ -695,6 +739,7 @@ impl DaemonHandle {
         // Spawn the event consumer within LocalSet.
         let bot = self.bot.clone();
         let chat_id = ChatId(self.config.chat_id);
+        let thread_id_ref = Arc::new(std::sync::atomic::AtomicI32::new(thread_id));
         if thread_id > 0 {
             tokio::task::spawn_local(with_session_context(
                 session_context.clone(),
@@ -708,14 +753,62 @@ impl DaemonHandle {
             ));
         } else {
             let available_commands_clone = available_commands.clone();
+            let bot_clone = bot.clone();
+            let chat_id_clone = chat_id;
+            let thread_id_ref_clone = thread_id_ref.clone();
             tokio::task::spawn_local(with_session_context(
                 session_context.clone(),
                 async move {
+                    use crate::handlers::EventHandler;
                     let mut rx = event_rx;
+                    let mut ctx = None;
+                    let mut draft = crate::handlers::draft::DraftHandler::new();
+                    let mut working = crate::handlers::working::WorkingHandler::new();
+                    let mut tool_call = crate::handlers::tool_call::ToolCallHandler::new();
+                    let mut plan = crate::handlers::plan::PlanHandler::new();
+
                     while let Some(event) = rx.recv().await {
                         if let AgentEvent::Update(update) = &event {
                             if let agent_client_protocol::SessionUpdate::AvailableCommandsUpdate(u) = update.as_ref() {
                                 *available_commands_clone.lock().await = u.available_commands.clone();
+                            }
+                        }
+
+                        let current_tid = thread_id_ref_clone.load(std::sync::atomic::Ordering::Relaxed);
+                        if current_tid > 0 {
+                            if ctx.is_none() {
+                                ctx = Some(crate::handlers::EventContext::new(bot_clone.clone(), chat_id_clone, current_tid));
+                            }
+                            let c = ctx.as_mut().unwrap();
+
+                            if draft.handle(&event, c).await {
+                                working.dismiss(c).await;
+                                continue;
+                            }
+                            draft.flush(c).await;
+                            if !matches!(event, AgentEvent::Working) {
+                                working.dismiss(c).await;
+                            }
+                            if working.handle(&event, c).await {
+                                continue;
+                            }
+                            if tool_call.handle(&event, c).await {
+                                continue;
+                            }
+                            if plan.handle(&event, c).await {
+                                continue;
+                            }
+                            match event {
+                                AgentEvent::Update(_) => {}
+                                AgentEvent::Finished { content } => {
+                                    c.send_html_chunks(&crate::formatting::format_completion(&content, None), false).await;
+                                    tool_call.reset(c).await;
+                                }
+                                AgentEvent::Error { content } => {
+                                    c.send_html_chunks(&crate::formatting::format_error(&content), false).await;
+                                    tool_call.reset(c).await;
+                                }
+                                _ => {}
                             }
                         }
                     }
@@ -751,6 +844,7 @@ impl DaemonHandle {
             command_tx: command_tx.clone(),
             cancel_tx: cancel_tx.clone(),
             history: history.clone(),
+            telegram_thread_id: thread_id_ref,
         };
         self.topics
             .entry(thread_id)
@@ -913,6 +1007,7 @@ async fn spawn_and_run_agent(
                         )))
                         .await;
                 }
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 session_loading_in_progress.store(false, Ordering::Relaxed);
             }
 
@@ -1187,7 +1282,7 @@ pub async fn run_daemon(config: Config) -> Result<()> {
         bot: bot.clone(),
         telegraph,
         session_event_sink,
-        start_time: chrono::Utc::now(),
+        start_time: std::sync::atomic::AtomicI64::new(chrono::Utc::now().timestamp()),
         local_start_tx,
         topics: DashMap::new(),
         pending_permissions: Arc::new(DashMap::new()),
@@ -1364,6 +1459,7 @@ pub async fn run_daemon(config: Config) -> Result<()> {
     }
 
     // Run Telegram bot (blocks)
+    daemon.start_time.store(chrono::Utc::now().timestamp(), std::sync::atomic::Ordering::Relaxed);
     telegram::run_bot(bot, daemon).await;
 
     Ok(())

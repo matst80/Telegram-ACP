@@ -46,11 +46,12 @@ async fn handle_message(bot: Bot, msg: Message, daemon: Arc<DaemonHandle>) -> an
         return Ok(());
     }
 
-    if msg.date < daemon.start_time {
+    let start_secs = daemon.start_time.load(std::sync::atomic::Ordering::Relaxed);
+    if msg.date.timestamp() < start_secs {
         tracing::debug!(
             "Skipping old message sent at {} (daemon started at {})",
             msg.date,
-            daemon.start_time
+            start_secs
         );
         return Ok(());
     }
