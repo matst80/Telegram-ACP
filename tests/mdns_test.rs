@@ -4,26 +4,40 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 #[test]
-#[ignore]
 fn test_mdns_advertise_and_discover() -> Result<()> {
     let mdns = ServiceDaemon::new()?;
-    let service_type = "_acp-ws-test._tcp.local.";
+    let service_type = "_acp-ws._tcp.local.";
     let instance_name = "test-ws-9005";
     let mut properties = HashMap::new();
     properties.insert("version".to_string(), "1.0".to_string());
+
+    let local_ip = if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
+        if socket.connect("8.8.8.8:80").is_ok() {
+            if let Ok(addr) = socket.local_addr() {
+                addr.ip().to_string()
+            } else {
+                "127.0.0.1".to_string()
+            }
+        } else {
+            "127.0.0.1".to_string()
+        }
+    } else {
+        "127.0.0.1".to_string()
+    };
 
     let service_info = ServiceInfo::new(
         service_type,
         instance_name,
         "localhost.local.",
-        "127.0.0.1",
+        &local_ip,
         9005,
         Some(properties),
     )?;
 
     mdns.register(service_info)?;
 
-    let receiver = mdns.browse(service_type)?;
+    let mdns_browser = ServiceDaemon::new()?;
+    let receiver = mdns_browser.browse(service_type)?;
     let start = std::time::Instant::now();
     let mut resolved = false;
 

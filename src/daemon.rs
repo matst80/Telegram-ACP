@@ -44,6 +44,7 @@ pub struct DaemonHandle {
     /// thread_id -> TopicEntry
     pub topics: DashMap<i32, TopicEntry>,
     pub pending_permissions: Arc<DashMap<String, oneshot::Sender<acp_sdk::PermissionOptionId>>>,
+    pub mdns: std::sync::Mutex<Option<mdns_sd::ServiceDaemon>>,
 }
 
 #[async_trait::async_trait]
@@ -216,7 +217,7 @@ impl crate::relay::WebSocketCommandHandler for DaemonHandle {
                 };
 
                 if let Some((_, mut topic_entry)) = self.topics.remove(&okey) {
-                    if let Some(mut active) = topic_entry.active.take() {
+                    if let Some(active) = topic_entry.active.take() {
                         active.telegram_thread_id.store(resolved_tid, std::sync::atomic::Ordering::Relaxed);
                         self.topics.entry(resolved_tid).or_insert_with(|| TopicEntry {
                             active: None,
@@ -352,6 +353,10 @@ impl DaemonHandle {
     /// Remove a topic from in-memory state and persisted storage.
     pub async fn remove_topic(&self, thread_id: i32) -> Option<TopicEntry> {
         let (_, entry) = self.topics.remove(&thread_id)?;
+        if let Some(active) = &entry.active {
+            let (tx, _rx) = tokio::sync::oneshot::channel();
+            let _ = active.cancel_tx.send(tx);
+        }
         self.persist_topics().await;
         Some(entry)
     }
@@ -734,7 +739,7 @@ impl DaemonHandle {
             .await?,
         );
         let mcp_session_id = mcp_session.id.clone();
-        let mcp_servers = build_mcp_servers(&mcp_session_id, &self.config.socket_path)?;
+        let mcp_servers = build_mcp_servers(&mcp_session_id, &self.config.socket_path, &self.config)?;
 
         // Spawn the event consumer within LocalSet.
         let bot = self.bot.clone();
@@ -884,6 +889,10 @@ impl DaemonHandle {
 
         // Wait for ACP init to complete, then fill in the real acp_session_id.
         let acp_session_id = result_rx.await??;
+        if !self.topics.contains_key(&thread_id) {
+            tracing::info!("Topic {thread_id} was removed during ACP init, skipping session restoration/persistence");
+            return Ok(acp_session_id);
+        }
         if let Some(topic) = self.topics.get(&thread_id) {
             if let Some(active) = topic.active.as_ref() {
                 active
@@ -1227,6 +1236,7 @@ async fn init_agent(
 fn build_mcp_servers(
     mcp_session_id: &str,
     socket_path: &std::path::Path,
+    config: &crate::config::Config,
 ) -> Result<Vec<acp_sdk::McpServer>> {
     let exe_path = std::env::current_exe()
         .map_err(|e| anyhow::anyhow!("Failed to resolve current executable: {e}"))?;
@@ -1237,10 +1247,35 @@ fn build_mcp_servers(
         "--socket".to_string(),
         socket_path.to_string_lossy().to_string(),
     ];
-    let server = acp_sdk::McpServer::Stdio(
+    let mut servers = vec![acp_sdk::McpServer::Stdio(
         acp_sdk::McpServerStdio::new("telegram-acp-relay", exe_path).args(args),
-    );
-    Ok(vec![server])
+    )];
+
+    for (name, mcp_cfg) in &config.mcp_servers {
+        let ty = mcp_cfg.r#type.as_deref().unwrap_or("").to_lowercase();
+        if ty == "stdio" || mcp_cfg.command.is_some() {
+            if let Some(cmd) = &mcp_cfg.command {
+                let mut s = acp_sdk::McpServerStdio::new(name, cmd);
+                if let Some(args) = &mcp_cfg.args {
+                    s = s.args(args.clone());
+                }
+                servers.push(acp_sdk::McpServer::Stdio(s));
+            }
+        } else {
+            let url_val = mcp_cfg.url.clone()
+                .or_else(|| mcp_cfg.server_url_camel.clone())
+                .or_else(|| mcp_cfg.server_url_snake.clone());
+            if let Some(u) = url_val {
+                if ty == "sse" {
+                    servers.push(acp_sdk::McpServer::Sse(acp_sdk::McpServerSse::new(name, u)));
+                } else {
+                    servers.push(acp_sdk::McpServer::Http(acp_sdk::McpServerHttp::new(name, u)));
+                }
+            }
+        }
+    }
+
+    Ok(servers)
 }
 
 fn mcp_expects_response(value: &JsonValue) -> bool {
@@ -1286,29 +1321,27 @@ pub async fn run_daemon(config: Config) -> Result<()> {
         local_start_tx,
         topics: DashMap::new(),
         pending_permissions: Arc::new(DashMap::new()),
+        mdns: std::sync::Mutex::new(None),
     });
 
     if let Some(bind_addr) = config.websocket_bind.clone() {
         let websocket_events = websocket_events.expect("websocket sink missing");
         let state_provider = daemon.clone() as Arc<dyn SessionStateProvider>;
         let command_handler = daemon.clone() as Arc<dyn crate::relay::WebSocketCommandHandler>;
-        let _mdns = if let Ok(addr) = bind_addr.parse::<std::net::SocketAddr>() {
+        if let Ok(addr) = bind_addr.parse::<std::net::SocketAddr>() {
+            tracing::info!(bind_addr = %bind_addr, port = addr.port(), "Attempting to start mDNS advertising");
             match crate::websocket::advertise_service(addr.port()) {
-                Ok(mdns) => {
-                    tracing::info!(port = addr.port(), "Websocket mDNS advertising started");
-                    Some(mdns)
+                Ok(mdns_daemon) => {
+                    tracing::info!(port = addr.port(), "Websocket mDNS advertising successfully registered in daemon");
+                    *daemon.mdns.lock().unwrap() = Some(mdns_daemon);
                 }
                 Err(err) => {
                     tracing::warn!("Failed to start mDNS advertising: {err}");
-                    None
                 }
             }
-        } else {
-            None
-        };
+        }
 
         tokio::task::spawn_local(async move {
-            let _keep_alive = _mdns;
             if let Err(err) = crate::websocket::run_server(
                 &bind_addr,
                 websocket_events,

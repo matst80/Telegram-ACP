@@ -3,6 +3,19 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct FileMcpServerConfig {
+    #[serde(rename = "type")]
+    pub r#type: Option<String>,
+    pub command: Option<String>,
+    pub args: Option<Vec<String>>,
+    pub url: Option<String>,
+    #[serde(rename = "serverUrl")]
+    pub server_url_camel: Option<String>,
+    #[serde(rename = "server_url")]
+    pub server_url_snake: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub bot_token: String,
@@ -15,6 +28,7 @@ pub struct Config {
     pub default_agent: String,
     pub agents: HashMap<String, String>,
     pub websocket_history_limit: usize,
+    pub mcp_servers: HashMap<String, FileMcpServerConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -27,6 +41,8 @@ struct FileConfig {
     websocket_bind: Option<String>,
     websocket_history_limit: Option<usize>,
     default_agent: Option<String>,
+    #[serde(alias = "mcpServers")]
+    mcp_servers: Option<HashMap<String, FileMcpServerConfig>>,
     #[serde(flatten)]
     extra_tables: HashMap<String, toml::Table>,
 }
@@ -93,6 +109,8 @@ impl Config {
             file_config.telegraph_author_url,
         );
 
+        let mcp_servers = file_config.mcp_servers.unwrap_or_default();
+
         Ok(Config {
             bot_token,
             chat_id,
@@ -103,6 +121,7 @@ impl Config {
             default_agent,
             agents,
             websocket_history_limit,
+            mcp_servers,
         })
     }
 
@@ -177,5 +196,49 @@ fn unknown_agent_message(agent: &str, agents: &HashMap<String, String>) -> Strin
             agent,
             available.join(", ")
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_mcp_servers() {
+        let toml_content = r#"
+            bot_token = "test"
+            chat_id = 123
+            default_agent = "claude"
+
+            [claude]
+            cmd = "claude-agent-acp"
+
+            [mcp_servers.rag]
+            serverUrl = "https://rag.k6n.net/mcp"
+
+            [mcp_servers.sqlite]
+            command = "sqlite_mcp"
+            args = ["--db", "test.db"]
+
+            [mcp_servers.mysse]
+            type = "sse"
+            url = "https://example.com/sse"
+        "#;
+
+        let file_cfg: FileConfig = toml::from_str(toml_content).unwrap();
+        let mcp_servers = file_cfg.mcp_servers.unwrap();
+
+        assert_eq!(mcp_servers.len(), 3);
+
+        let rag = mcp_servers.get("rag").unwrap();
+        assert_eq!(rag.server_url_camel.as_deref(), Some("https://rag.k6n.net/mcp"));
+
+        let sqlite = mcp_servers.get("sqlite").unwrap();
+        assert_eq!(sqlite.command.as_deref(), Some("sqlite_mcp"));
+        assert_eq!(sqlite.args.as_ref().unwrap(), &vec!["--db".to_string(), "test.db".to_string()]);
+
+        let mysse = mcp_servers.get("mysse").unwrap();
+        assert_eq!(mysse.r#type.as_deref(), Some("sse"));
+        assert_eq!(mysse.url.as_deref(), Some("https://example.com/sse"));
     }
 }

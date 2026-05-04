@@ -120,6 +120,39 @@ async fn handle_connection(
     Ok(())
 }
 
+fn get_local_ip() -> String {
+    if let Ok(interfaces) = if_addrs::get_if_addrs() {
+        let mut ips = Vec::new();
+        for iface in interfaces {
+            if iface.is_loopback() {
+                continue;
+            }
+            if let std::net::IpAddr::V4(ipv4) = iface.addr.ip() {
+                let ip_str = ipv4.to_string();
+                if ip_str.starts_with("10.") {
+                    return ip_str;
+                }
+                ips.push(ip_str);
+            }
+        }
+        if let Some(first_ip) = ips.first() {
+            return first_ip.clone();
+        }
+    }
+
+    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
+        for target in &["8.8.8.8:80", "1.1.1.1:80"] {
+            if socket.connect(target).is_ok() {
+                if let Ok(addr) = socket.local_addr() {
+                    return addr.ip().to_string();
+                }
+            }
+        }
+    }
+
+    "127.0.0.1".to_string()
+}
+
 pub fn advertise_service(port: u16) -> Result<ServiceDaemon> {
     let mdns = ServiceDaemon::new()?;
     let service_type = "_acp-ws._tcp.local.";
@@ -129,11 +162,23 @@ pub fn advertise_service(port: u16) -> Result<ServiceDaemon> {
     properties.insert("auth".to_string(), "bearer".to_string());
     properties.insert("protocol".to_string(), "acp-ws/1".to_string());
 
+    let local_ip = get_local_ip();
+    let hostname = format!("{}.local.", local_ip);
+
+    tracing::info!(
+        service_type = service_type,
+        instance_name = %instance_name,
+        hostname = %hostname,
+        local_ip = %local_ip,
+        port = port,
+        "Websocket mDNS advertising details"
+    );
+
     let service_info = ServiceInfo::new(
         service_type,
         &instance_name,
-        "localhost.local.",
-        "",
+        &hostname,
+        &local_ip,
         port,
         Some(properties),
     )?;

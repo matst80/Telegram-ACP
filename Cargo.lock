@@ -2405,6 +2405,7 @@ dependencies = [
  "dashmap",
  "dirs",
  "futures",
+ "if-addrs",
  "mdns-sd",
  "platform-dirs",
  "pulldown-cmark",
