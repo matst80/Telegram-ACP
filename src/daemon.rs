@@ -1222,6 +1222,11 @@ async fn run_rag_registration(config: Config, actual_port: u16) {
 
                     match res {
                         Ok(resp) if resp.status().is_success() => {
+                            let body = resp.text().await.unwrap_or_default();
+                            if body.trim() == "false" {
+                                tracing::warn!("RAG heartbeat returned false (not registered), re-registering");
+                                break;
+                            }
                             tracing::info!("RAG heartbeat sent successfully");
                         }
                         Ok(resp) => {

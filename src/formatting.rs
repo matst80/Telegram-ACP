@@ -45,12 +45,41 @@ pub fn format_text_message(text: &str) -> String {
 
 /// Format a thought/reasoning message for Telegram (HTML).
 pub fn format_thought_message(text: &str) -> String {
+    let cleaned = clean_thought_text(text);
     let header = "💭 <b>Thought</b>";
-    if text.trim().is_empty() {
+    if cleaned.is_empty() {
         header.to_string()
     } else {
-        format!("{header}\n{}", format_collapsible_block_html(text, 3900))
+        format!("{header}\n{}", format_collapsible_block_html(&cleaned, 3900))
     }
+}
+
+/// Clean thought text by removing common agent prefixes (like Claude Code's "💭 Thought" and CWD).
+pub fn clean_thought_text(text: &str) -> String {
+    let mut cleaned = text.trim();
+
+    // Strip "💭 Thought"
+    if cleaned.starts_with("💭 Thought") {
+        cleaned = cleaned["💭 Thought".len()..].trim_start();
+    }
+
+    // Strip "[current working directory ...]"
+    if cleaned.starts_with("[current working directory") {
+        if let Some(pos) = cleaned.find(']') {
+            cleaned = cleaned[pos + 1..].trim_start();
+        }
+    }
+
+    // Strip leading '(' and trailing ')' if they wrap the content
+    let mut result = cleaned.to_string();
+    if result.starts_with('(') {
+        result.remove(0);
+    }
+    if result.ends_with(')') {
+        result.pop();
+    }
+
+    result.trim().to_string()
 }
 
 /// Format a tool call notification (HTML).
@@ -441,5 +470,19 @@ mod tests {
         assert!(text.contains("/<code>"));
         assert!(text.contains("</code>"));
         assert!(!text.contains("<tag>"));
+    }
+
+    #[test]
+    fn cleans_thought_prefixes() {
+        use super::clean_thought_text;
+        let input = "💭 Thought\n[current working directory /home/mats/github.com/matst80/magic-mirror-native] (Checking for available font packages on the Pi.)";
+        let cleaned = clean_thought_text(input);
+        assert_eq!(cleaned, "Checking for available font packages on the Pi.");
+
+        let input_simple = "💭 Thought (Doing things)";
+        assert_eq!(clean_thought_text(input_simple), "Doing things");
+
+        let input_partial = "💭 Thought\n[current working directory /tmp] (Wait...";
+        assert_eq!(clean_thought_text(input_partial), "Wait...");
     }
 }

@@ -84,7 +84,13 @@ impl DraftHandler {
             kind,
         });
         d.text.push_str(text);
-        if let Err(e) = ctx.send_draft(d.draft_id, &d.text).await {
+
+        let display_text = match kind {
+            DraftKind::AgentThought => formatting::clean_thought_text(&d.text),
+            _ => d.text.clone(),
+        };
+
+        if let Err(e) = ctx.send_draft(d.draft_id, &display_text).await {
             sess_warn!(
                 "Draft message update failed ({} bytes): {}",
                 d.text.len(),
