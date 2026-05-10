@@ -10,6 +10,7 @@ use futures::future::join_all;
 use rmcp::service::RxJsonRpcMessage;
 use rmcp::RoleServer;
 use serde_json::Value as JsonValue;
+use reqwest;
 use telegraph_rs::Telegraph;
 use teloxide::prelude::*;
 use teloxide::types::InputFile;
@@ -19,7 +20,7 @@ use uuid::Uuid;
 use crate::acp;
 use crate::config::Config;
 use crate::mcp;
-use crate::persistence::{self, PersistedTopic};
+use crate::persistence;
 use crate::relay::{
     BroadcastSessionEventSink, MultiSessionEventSink, NoopSessionEventSink, SessionEvent,
     SessionEventSink, SessionStateProvider,
@@ -31,6 +32,8 @@ use crate::telegram;
 use crate::types::{AgentEvent, SessionRecord, SessionStatus};
 use crate::{sess_error, sess_info};
 
+use crate::session_manager::{SessionEntry, SessionManager, TopicEntry};
+
 /// Shared daemon state, accessible from Telegram handlers and IPC.
 pub struct DaemonHandle {
     pub config: Config,
@@ -41,17 +44,55 @@ pub struct DaemonHandle {
     pub start_time: std::sync::atomic::AtomicI64,
     /// Relay for starting ACP sessions inside the daemon's LocalSet task.
     local_start_tx: mpsc::UnboundedSender<StartSessionRequest>,
-    /// thread_id -> TopicEntry
-    pub topics: DashMap<i32, TopicEntry>,
+    pub session_manager: SessionManager,
     pub pending_permissions: Arc<DashMap<String, oneshot::Sender<acp_sdk::PermissionOptionId>>>,
     pub mdns: std::sync::Mutex<Option<mdns_sd::ServiceDaemon>>,
+}
+
+impl DaemonHandle {
+    pub fn list_projects(&self) -> Vec<crate::relay::ProjectInfo> {
+        let mut projects = Vec::new();
+        if let Some(root) = &self.config.project_root {
+            if let Ok(entries) = std::fs::read_dir(root) {
+                for entry in entries.flatten() {
+                    if let Ok(file_type) = entry.file_type() {
+                        if file_type.is_dir() {
+                            let path = entry.path();
+                            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                                projects.push(crate::relay::ProjectInfo {
+                                    name: name.to_string(),
+                                    path,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        projects.sort_by(|a, b| a.name.cmp(&b.name));
+        projects
+    }
+
+    pub fn resolve_project_path(&self, path: PathBuf) -> PathBuf {
+        if path.is_absolute() {
+            return path;
+        }
+
+        if let Some(root) = &self.config.project_root {
+            let joined = root.join(&path);
+            if joined.exists() {
+                return joined;
+            }
+        }
+        path
+    }
 }
 
 #[async_trait::async_trait]
 impl SessionStateProvider for DaemonHandle {
     async fn get_snapshot(&self) -> Vec<SessionEvent> {
         let mut sessions = Vec::new();
-        for entry in self.topics.iter() {
+        for entry in self.session_manager.topics.iter() {
             let thread_id = *entry.key();
             let topic = entry.value();
             if let Some(active) = &topic.active {
@@ -64,13 +105,14 @@ impl SessionStateProvider for DaemonHandle {
                         agent_command: active.agent_command.clone(),
                         agent_name: active.agent_name.clone(),
                         status,
-                        thread_id: Some(thread_id),
+                        thread_id: if thread_id > 0 { Some(thread_id) } else { None },
                         history,
                     });
                 }
             }
         }
-        vec![SessionEvent::Snapshot { sessions }]
+        let projects = self.list_projects();
+        vec![SessionEvent::Snapshot { sessions, projects }]
     }
 }
 
@@ -79,7 +121,7 @@ impl crate::relay::WebSocketCommandHandler for DaemonHandle {
     async fn handle_command(&self, command: crate::relay::WebSocketCommand) -> anyhow::Result<()> {
         match command {
             crate::relay::WebSocketCommand::SendPrompt { thread_id, session_id, text } => {
-                let tx = self
+                let tx = self.session_manager
                     .resolve_session_tx(thread_id, session_id.clone())
                     .ok_or_else(|| anyhow::anyhow!("No active session found"))?;
                 tx.send(SessionCommand::Prompt(vec![
@@ -90,7 +132,7 @@ impl crate::relay::WebSocketCommandHandler for DaemonHandle {
                 .map_err(|_| anyhow::anyhow!("Failed to send prompt to session"))?;
             }
             crate::relay::WebSocketCommand::Cancel { thread_id, session_id } => {
-                let cancel_tx = self
+                let cancel_tx = self.session_manager
                     .resolve_session_cancel_tx(thread_id, session_id)
                     .ok_or_else(|| anyhow::anyhow!("No active session found"))?;
                 let (result_tx, result_rx) = tokio::sync::oneshot::channel();
@@ -105,7 +147,7 @@ impl crate::relay::WebSocketCommandHandler for DaemonHandle {
                 config_id,
                 value_id,
             } => {
-                let tx = self
+                let tx = self.session_manager
                     .resolve_session_tx(thread_id, session_id)
                     .ok_or_else(|| anyhow::anyhow!("No active session found"))?;
                 let (result_tx, result_rx) = tokio::sync::oneshot::channel();
@@ -118,7 +160,7 @@ impl crate::relay::WebSocketCommandHandler for DaemonHandle {
                 result_rx.await??;
             }
             crate::relay::WebSocketCommand::SetPermissionMode { thread_id, session_id, mode_id } => {
-                let tx = self
+                let tx = self.session_manager
                     .resolve_session_tx(thread_id, session_id)
                     .ok_or_else(|| anyhow::anyhow!("No active session found"))?;
                 let (result_tx, result_rx) = tokio::sync::oneshot::channel();
@@ -130,13 +172,13 @@ impl crate::relay::WebSocketCommandHandler for DaemonHandle {
                 project_path,
                 agent_command,
                 thread_id,
-                metadata: _,
+                _metadata: _,
             } => {
                 let resolved_thread_id = thread_id.unwrap_or_else(|| {
                     // Generate unique negative thread ID for headless session
-                    -1 - (self.topics.len() as i32)
+                    -1 - (self.session_manager.topics.len() as i32)
                 });
-                let path = PathBuf::from(&project_path);
+                let path = self.resolve_project_path(PathBuf::from(&project_path));
                 let (agent_name, agent_cmd) = self.config.resolve_agent(agent_command.as_deref())?;
                 self.enqueue_start_session(
                     resolved_thread_id,
@@ -149,7 +191,7 @@ impl crate::relay::WebSocketCommandHandler for DaemonHandle {
                 .await?;
             }
             crate::relay::WebSocketCommand::EndSession { session_id, thread_id } => {
-                let cancel_tx = self
+                let cancel_tx = self.session_manager
                     .resolve_session_cancel_tx(thread_id, session_id.clone())
                     .ok_or_else(|| anyhow::anyhow!("No active session found"))?;
                 let (result_tx, result_rx) = tokio::sync::oneshot::channel();
@@ -159,11 +201,11 @@ impl crate::relay::WebSocketCommandHandler for DaemonHandle {
                 // Also remove it from topics if it's headless (negative ID)
                 if let Some(tid) = thread_id {
                     if tid < 0 {
-                        self.topics.remove(&tid);
+                        self.session_manager.topics.remove(&tid);
                     }
                 } else if let Some(sid) = session_id {
                     let mut to_remove = None;
-                    for entry in self.topics.iter() {
+                    for entry in self.session_manager.topics.iter() {
                         if let Some(active) = &entry.value().active {
                             if active.acp_session_id.as_deref() == Some(&sid) {
                                 to_remove = Some(*entry.key());
@@ -173,7 +215,7 @@ impl crate::relay::WebSocketCommandHandler for DaemonHandle {
                     }
                     if let Some(tid) = to_remove {
                         if tid < 0 {
-                            self.topics.remove(&tid);
+                            self.session_manager.topics.remove(&tid);
                         }
                     }
                 }
@@ -183,10 +225,48 @@ impl crate::relay::WebSocketCommandHandler for DaemonHandle {
                     let _ = tx.send(agent_client_protocol::PermissionOptionId::new(decision));
                 }
             }
-            crate::relay::WebSocketCommand::BindTelegramThread { session_id, thread_id } => {
-                let sid = session_id.ok_or_else(|| anyhow::anyhow!("session_id required"))?;
+            crate::relay::WebSocketCommand::BindTelegramThread { session_id, thread_id, name } => {
+                let sid = session_id.clone().ok_or_else(|| anyhow::anyhow!("session_id required"))?;
+                
+                // Validation rules (daemon-side)
+                if thread_id.is_none() || thread_id.unwrap() <= 0 {
+                    if let Some(n) = &name {
+                        let trimmed = n.trim();
+                        if trimmed.is_empty() {
+                            self.session_event_sink.publish(SessionEvent::Error {
+                                in_reply_to: Some("bind_telegram_thread".to_string()),
+                                session_id: session_id.clone(),
+                                code: "name_required".to_string(),
+                                message: "name field required when thread_id is null".to_string(),
+                            }).await;
+                            return Ok(());
+                        }
+                        if trimmed.len() > 128 {
+                            self.session_event_sink.publish(SessionEvent::Error {
+                                in_reply_to: Some("bind_telegram_thread".to_string()),
+                                session_id: session_id.clone(),
+                                code: "invalid_argument".to_string(),
+                                message: "name too long (max 128 chars)".to_string(),
+                            }).await;
+                            return Ok(());
+                        }
+                        if trimmed.chars().any(|c| c.is_control()) {
+                            self.session_event_sink.publish(SessionEvent::Error {
+                                in_reply_to: Some("bind_telegram_thread".to_string()),
+                                session_id: session_id.clone(),
+                                code: "invalid_argument".to_string(),
+                                message: "name contains control characters".to_string(),
+                            }).await;
+                            return Ok(());
+                        }
+                    } else {
+                        // Migration fallback
+                        tracing::warn!("bind_telegram_thread: name missing when thread_id is null. Falling back to project name (deprecated).");
+                    }
+                }
+
                 let mut old_key = None;
-                for entry in self.topics.iter() {
+                for entry in self.session_manager.topics.iter() {
                     if let Some(active) = &entry.value().active {
                         if active.acp_session_id.as_deref() == Some(&sid) {
                             old_key = Some(*entry.key());
@@ -196,33 +276,47 @@ impl crate::relay::WebSocketCommandHandler for DaemonHandle {
                 }
                 let okey = old_key.ok_or_else(|| anyhow::anyhow!("No active session found"))?;
 
-                let resolved_tid = match thread_id {
-                    Some(tid) if tid > 0 => tid,
+                let mut created = false;
+                let (resolved_tid, resolved_name) = match thread_id {
+                    Some(tid) if tid > 0 => (tid, name.clone().unwrap_or_default()),
                     _ => {
-                        let folder_name = {
-                            let topics = self.topics.get(&okey).unwrap();
-                            let active = topics.active.as_ref().unwrap();
-                            active.project_path
-                                .file_name()
-                                .map(|n| n.to_string_lossy().to_string())
-                                .unwrap_or_else(|| "project".to_string())
+                        created = true;
+                        let topic_name = if let Some(n) = name.as_ref() {
+                            n.trim().to_string()
+                        } else {
+                            let folder_name = {
+                                let topics = self.session_manager.topics.get(&okey).unwrap();
+                                let active = topics.active.as_ref().unwrap();
+                                active.project_path
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().to_string())
+                                    .unwrap_or_else(|| "project".to_string())
+                            };
+                            format!("{}: {}", folder_name, Self::generate_two_words())
                         };
-                        let topic_name = format!("{}: {}", folder_name, Self::generate_two_words());
                         let topic = self.bot
                             .create_forum_topic(ChatId(self.config.chat_id), &topic_name)
                             .icon_color(teloxide::types::Rgb::from_u32(0x6FB9F0))
                             .await?;
-                        topic.thread_id.0 .0
+                        (topic.thread_id.0 .0, topic_name)
                     }
                 };
 
-                if let Some((_, mut topic_entry)) = self.topics.remove(&okey) {
+                if let Some((_, mut topic_entry)) = self.session_manager.topics.remove(&okey) {
                     if let Some(active) = topic_entry.active.take() {
                         active.telegram_thread_id.store(resolved_tid, std::sync::atomic::Ordering::Relaxed);
-                        self.topics.entry(resolved_tid).or_insert_with(|| TopicEntry {
+                        self.session_manager.topics.entry(resolved_tid).or_insert_with(|| TopicEntry {
                             active: None,
                             history: Vec::new(),
                         }).active = Some(active);
+
+                        // Emit event
+                        self.session_event_sink.publish(SessionEvent::TelegramThreadBound {
+                            session_id: sid,
+                            thread_id: resolved_tid,
+                            name: resolved_name,
+                            created,
+                        }).await;
                     }
                 }
             }
@@ -238,33 +332,7 @@ impl crate::relay::WebSocketCommandHandler for DaemonHandle {
     }
 }
 
-pub struct TopicEntry {
-    /// Currently running session, if any.
-    pub active: Option<SessionEntry>,
-    /// All sessions ever bound to this topic.
-    pub history: Vec<SessionRecord>,
-}
-
-pub struct SessionEntry {
-    pub acp_session_id: Option<String>,
-    pub mcp_session_id: String,
-    pub mcp: Arc<mcp::McpSession>,
-    pub session_log: Arc<SessionLog>,
-    pub project_path: PathBuf,
-    pub agent_command: String,
-    pub agent_name: Option<String>,
-    pub status: Arc<tokio::sync::Mutex<SessionStatus>>,
-    pub available_commands: Arc<tokio::sync::Mutex<Vec<acp_sdk::AvailableCommand>>>,
-    pub control_state: Arc<tokio::sync::Mutex<session_control::SessionControlState>>,
-    #[allow(dead_code)]
-    pub permission_handling: Arc<std::sync::Mutex<crate::types::PermissionHandling>>,
-    pub command_tx: mpsc::UnboundedSender<SessionCommand>,
-    pub cancel_tx: mpsc::UnboundedSender<oneshot::Sender<Result<()>>>,
-    pub history: Arc<tokio::sync::Mutex<std::collections::VecDeque<SessionEvent>>>,
-    pub telegram_thread_id: Arc<std::sync::atomic::AtomicI32>,
-}
-
-struct StartSessionRequest {
+pub struct StartSessionRequest {
     thread_id: i32,
     project_path: PathBuf,
     agent_cmd: String,
@@ -276,29 +344,19 @@ struct StartSessionRequest {
 }
 
 impl DaemonHandle {
-    fn get_mcp_session_by_id(&self, session_id: &str) -> Option<Arc<mcp::McpSession>> {
-        self.topics.iter().find_map(|entry| {
-            entry
-                .active
-                .as_ref()
-                .filter(|s| s.mcp_session_id == session_id)
-                .map(|s| s.mcp.clone())
-        })
-    }
-
     pub async fn handle_mcp_message(
         &self,
         session_id: &str,
         payload: &str,
     ) -> Result<Option<String>> {
         tracing::debug!(session_id, "handle_mcp_message: looking up session");
-        let mcp_session = self
+        let mcp_session = self.session_manager
             .get_mcp_session_by_id(session_id)
             .ok_or_else(|| anyhow::anyhow!("Unknown MCP session id: {}", session_id))?;
 
         let payload_value: JsonValue = serde_json::from_str(payload)
             .map_err(|e| anyhow::anyhow!("Invalid MCP payload: {e}"))?;
-        let expects_response = mcp_expects_response(&payload_value);
+        let expects_response = crate::mcp::mcp_expects_response(&payload_value);
         tracing::debug!(
             session_id,
             expects_response,
@@ -331,7 +389,7 @@ impl DaemonHandle {
 
     pub async fn cancel_session(&self, thread_id: i32) -> Result<()> {
         let cancel_tx = {
-            let entry = self
+            let entry = self.session_manager
                 .topics
                 .get(&thread_id)
                 .ok_or_else(|| anyhow::anyhow!("No topic for this thread"))?;
@@ -352,121 +410,9 @@ impl DaemonHandle {
 
     /// Remove a topic from in-memory state and persisted storage.
     pub async fn remove_topic(&self, thread_id: i32) -> Option<TopicEntry> {
-        let (_, entry) = self.topics.remove(&thread_id)?;
-        if let Some(active) = &entry.active {
-            let (tx, _rx) = tokio::sync::oneshot::channel();
-            let _ = active.cancel_tx.send(tx);
-        }
-        self.persist_topics().await;
+        let entry = self.session_manager.remove_topic(thread_id).await?;
+        self.session_manager.persist_topics().await;
         Some(entry)
-    }
-
-    pub fn resolve_session_tx(
-        &self,
-        thread_id: Option<i32>,
-        session_id: Option<String>,
-    ) -> Option<mpsc::UnboundedSender<SessionCommand>> {
-        if let Some(sid) = session_id {
-            for entry in self.topics.iter() {
-                if let Some(active) = &entry.value().active {
-                    if active.acp_session_id.as_deref() == Some(&sid) {
-                        return Some(active.command_tx.clone());
-                    }
-                }
-            }
-        }
-        if let Some(tid) = thread_id {
-            return self.get_session_command_tx_by_thread(tid);
-        }
-        None
-    }
-
-    pub fn resolve_session_cancel_tx(
-        &self,
-        thread_id: Option<i32>,
-        session_id: Option<String>,
-    ) -> Option<mpsc::UnboundedSender<oneshot::Sender<Result<()>>>> {
-        if let Some(sid) = session_id {
-            for entry in self.topics.iter() {
-                if let Some(active) = &entry.value().active {
-                    if active.acp_session_id.as_deref() == Some(&sid) {
-                        return Some(active.cancel_tx.clone());
-                    }
-                }
-            }
-        }
-        if let Some(tid) = thread_id {
-            return self.topics.get(&tid)?.active.as_ref().map(|e| e.cancel_tx.clone());
-        }
-        None
-    }
-
-    pub fn get_session_command_tx_by_thread(
-        &self,
-        thread_id: i32,
-    ) -> Option<mpsc::UnboundedSender<SessionCommand>> {
-        self.topics
-            .get(&thread_id)?
-            .active
-            .as_ref()
-            .map(|e| e.command_tx.clone())
-    }
-
-    pub fn get_session_project_path_by_thread(&self, thread_id: i32) -> Option<PathBuf> {
-        self.topics
-            .get(&thread_id)?
-            .active
-            .as_ref()
-            .map(|e| e.project_path.clone())
-    }
-
-    pub fn get_session_agent_by_thread(&self, thread_id: i32) -> Option<String> {
-        self.topics
-            .get(&thread_id)?
-            .active
-            .as_ref()
-            .and_then(|e| e.agent_name.clone())
-    }
-
-    pub fn get_acp_session_id_by_thread(&self, thread_id: i32) -> Option<String> {
-        self.topics
-            .get(&thread_id)?
-            .active
-            .as_ref()?
-            .acp_session_id
-            .clone()
-    }
-
-    pub async fn get_available_commands_by_thread(
-        &self,
-        thread_id: i32,
-    ) -> Option<Vec<acp_sdk::AvailableCommand>> {
-        let available_commands = self
-            .topics
-            .get(&thread_id)?
-            .active
-            .as_ref()
-            .map(|e| e.available_commands.clone())?;
-        let commands = available_commands.lock().await.clone();
-        Some(commands)
-    }
-
-    /// Persist current topics to disk.
-    pub async fn persist_topics(&self) {
-        let mut persisted = Vec::new();
-        for entry in self.topics.iter() {
-            let thread_id = *entry.key();
-            let topic = entry.value();
-            let active_session_id = topic.active.as_ref().and_then(|s| s.acp_session_id.clone());
-            persisted.push(PersistedTopic {
-                thread_id,
-                active_session_id,
-                sessions: topic.history.clone(),
-            });
-        }
-        if let Err(e) = persistence::save_topics(&persisted) {
-            tracing::error!("Failed to persist topics: {e}");
-        }
     }
 
     fn generate_two_words() -> String {
@@ -563,7 +509,7 @@ impl DaemonHandle {
         };
 
         if let Some(text) = _prompt {
-            if let Some(tx) = self.get_session_command_tx_by_thread(thread_id) {
+            if let Some(tx) = self.session_manager.get_session_command_tx_by_thread(thread_id) {
                 let _ = tx.send(SessionCommand::Prompt(vec![
                     agent_client_protocol::ContentBlock::Text(
                         agent_client_protocol::TextContent::new(text),
@@ -587,7 +533,7 @@ impl DaemonHandle {
         let (agent_name, agent_cmd) = self.config.resolve_agent(agent.as_deref())?;
 
         // Deactivate current session (drop it)
-        if let Some(mut entry) = self.topics.get_mut(&thread_id) {
+        if let Some(mut entry) = self.session_manager.topics.get_mut(&thread_id) {
             entry.active = None;
         }
 
@@ -609,7 +555,7 @@ impl DaemonHandle {
         record: &SessionRecord,
     ) -> Result<String> {
         // Deactivate current session (drop it)
-        if let Some(mut entry) = self.topics.get_mut(&thread_id) {
+        if let Some(mut entry) = self.session_manager.topics.get_mut(&thread_id) {
             entry.active = None;
         }
 
@@ -739,7 +685,7 @@ impl DaemonHandle {
             .await?,
         );
         let mcp_session_id = mcp_session.id.clone();
-        let mcp_servers = build_mcp_servers(&mcp_session_id, &self.config.socket_path, &self.config)?;
+        let mcp_servers = crate::mcp::build_mcp_servers(&mcp_session_id, &self.config.socket_path, &self.config)?;
 
         // Spawn the event consumer within LocalSet.
         let bot = self.bot.clone();
@@ -764,13 +710,9 @@ impl DaemonHandle {
             tokio::task::spawn_local(with_session_context(
                 session_context.clone(),
                 async move {
-                    use crate::handlers::EventHandler;
                     let mut rx = event_rx;
                     let mut ctx = None;
-                    let mut draft = crate::handlers::draft::DraftHandler::new();
-                    let mut working = crate::handlers::working::WorkingHandler::new();
-                    let mut tool_call = crate::handlers::tool_call::ToolCallHandler::new();
-                    let mut plan = crate::handlers::plan::PlanHandler::new();
+                    let mut consumer = crate::handlers::SessionEventConsumer::new();
 
                     while let Some(event) = rx.recv().await {
                         if let AgentEvent::Update(update) = &event {
@@ -782,40 +724,14 @@ impl DaemonHandle {
                         let current_tid = thread_id_ref_clone.load(std::sync::atomic::Ordering::Relaxed);
                         if current_tid > 0 {
                             if ctx.is_none() {
-                                ctx = Some(crate::handlers::EventContext::new(bot_clone.clone(), chat_id_clone, current_tid));
+                                ctx = Some(crate::handlers::EventContext::for_telegram(bot_clone.clone(), chat_id_clone, current_tid));
                             }
                             let c = ctx.as_mut().unwrap();
-
-                            if draft.handle(&event, c).await {
-                                working.dismiss(c).await;
-                                continue;
-                            }
-                            draft.flush(c).await;
-                            if !matches!(event, AgentEvent::Working) {
-                                working.dismiss(c).await;
-                            }
-                            if working.handle(&event, c).await {
-                                continue;
-                            }
-                            if tool_call.handle(&event, c).await {
-                                continue;
-                            }
-                            if plan.handle(&event, c).await {
-                                continue;
-                            }
-                            match event {
-                                AgentEvent::Update(_) => {}
-                                AgentEvent::Finished { content } => {
-                                    c.send_html_chunks(&crate::formatting::format_completion(&content, None), false).await;
-                                    tool_call.reset(c).await;
-                                }
-                                AgentEvent::Error { content } => {
-                                    c.send_html_chunks(&crate::formatting::format_error(&content), false).await;
-                                    tool_call.reset(c).await;
-                                }
-                                _ => {}
-                            }
+                            consumer.handle_event(&event, c).await;
                         }
+                    }
+                    if let Some(c) = ctx.as_mut() {
+                        consumer.finish(c).await;
                     }
                 },
             ));
@@ -851,7 +767,7 @@ impl DaemonHandle {
             history: history.clone(),
             telegram_thread_id: thread_id_ref,
         };
-        self.topics
+        self.session_manager.topics
             .entry(thread_id)
             .or_insert_with(|| TopicEntry {
                 active: None,
@@ -889,18 +805,18 @@ impl DaemonHandle {
 
         // Wait for ACP init to complete, then fill in the real acp_session_id.
         let acp_session_id = result_rx.await??;
-        if !self.topics.contains_key(&thread_id) {
+        if !self.session_manager.topics.contains_key(&thread_id) {
             tracing::info!("Topic {thread_id} was removed during ACP init, skipping session restoration/persistence");
             return Ok(acp_session_id);
         }
-        if let Some(topic) = self.topics.get(&thread_id) {
+        if let Some(topic) = self.session_manager.topics.get(&thread_id) {
             if let Some(active) = topic.active.as_ref() {
                 active
                     .session_log
                     .set_acp_session_id(acp_session_id.clone())?;
             }
         }
-        if let Some(mut topic) = self.topics.get_mut(&thread_id) {
+        if let Some(mut topic) = self.session_manager.topics.get_mut(&thread_id) {
             if let Some(active) = topic.active.as_mut() {
                 active.acp_session_id = Some(acp_session_id.clone());
             }
@@ -918,7 +834,7 @@ impl DaemonHandle {
         };
 
         // Get or create TopicEntry, set active, append to history
-        let mut topic = self.topics.entry(thread_id).or_insert_with(|| TopicEntry {
+        let mut topic = self.session_manager.topics.entry(thread_id).or_insert_with(|| TopicEntry {
             active: None,
             history: Vec::new(),
         });
@@ -938,7 +854,7 @@ impl DaemonHandle {
         drop(topic);
 
         // Persist after successful init
-        self.persist_topics().await;
+        self.session_manager.persist_topics().await;
 
         session_event_sink
             .publish(if resumed_session && initiated_via_switch {
@@ -1233,61 +1149,116 @@ async fn init_agent(
     Ok((conn, child, bootstrap, session_loading_in_progress))
 }
 
-fn build_mcp_servers(
-    mcp_session_id: &str,
-    socket_path: &std::path::Path,
-    config: &crate::config::Config,
-) -> Result<Vec<acp_sdk::McpServer>> {
-    let exe_path = std::env::current_exe()
-        .map_err(|e| anyhow::anyhow!("Failed to resolve current executable: {e}"))?;
-    let args = vec![
-        "mcp-relay".to_string(),
-        "--session".to_string(),
-        mcp_session_id.to_string(),
-        "--socket".to_string(),
-        socket_path.to_string_lossy().to_string(),
-    ];
-    let mut servers = vec![acp_sdk::McpServer::Stdio(
-        acp_sdk::McpServerStdio::new("telegram-acp-relay", exe_path).args(args),
-    )];
+async fn run_rag_registration(config: Config, actual_port: u16) {
+    let url = match config.rag_register_url.as_ref() {
+        Some(u) => u,
+        None => return,
+    };
+    let token = match config.rag_token.as_ref() {
+        Some(t) => t,
+        None => {
+            tracing::warn!("RAG registration URL provided but no token");
+            return;
+        }
+    };
+    let name = config
+        .rag_register_name
+        .clone()
+        .unwrap_or_else(|| format!("acp-ws-{}", actual_port));
+    let host = config
+        .rag_register_host
+        .clone()
+        .unwrap_or_else(|| crate::websocket::get_local_ip());
 
-    for (name, mcp_cfg) in &config.mcp_servers {
-        let ty = mcp_cfg.r#type.as_deref().unwrap_or("").to_lowercase();
-        if ty == "stdio" || mcp_cfg.command.is_some() {
-            if let Some(cmd) = &mcp_cfg.command {
-                let mut s = acp_sdk::McpServerStdio::new(name, cmd);
-                if let Some(args) = &mcp_cfg.args {
-                    s = s.args(args.clone());
+    let client = reqwest::Client::new();
+
+    // Heartbeat URL: replace /register with /heartbeat
+    let heartbeat_url = url.replace("/register", "/heartbeat");
+
+    let register_payload = serde_json::json!({
+        "name": name,
+        "host": host,
+        "port": actual_port,
+    });
+
+    let heartbeat_payload = serde_json::json!({
+        "name": name,
+    });
+
+    loop {
+        tracing::info!(
+            url = %url,
+            name = %name,
+            host = %host,
+            port = actual_port,
+            payload = ?register_payload,
+            "Sending registration request to remote RAG"
+        );
+        let res = client
+            .post(url)
+            .header("Authorization", format!("Bearer {}", token))
+            .json(&register_payload)
+            .send()
+            .await;
+
+        match res {
+            Ok(resp) if resp.status().is_success() => {
+                tracing::info!("Successfully registered with remote RAG");
+
+                // Heartbeat loop
+                loop {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+                    tracing::info!(
+                        url = %heartbeat_url,
+                        payload = ?heartbeat_payload,
+                        "Sending heartbeat to remote RAG"
+                    );
+                    let res = client
+                        .post(&heartbeat_url)
+                        .header("Authorization", format!("Bearer {}", token))
+                        .json(&heartbeat_payload)
+                        .send()
+                        .await;
+
+                    match res {
+                        Ok(resp) if resp.status().is_success() => {
+                            tracing::info!("RAG heartbeat sent successfully");
+                        }
+                        Ok(resp) => {
+                            let status = resp.status();
+                            let body = resp.text().await.unwrap_or_default();
+                            tracing::warn!(
+                                status = %status,
+                                body = %body,
+                                "RAG heartbeat failed, re-registering"
+                            );
+                            break; // break inner loop to re-register
+                        }
+                        Err(err) => {
+                            tracing::warn!(error = %err, "RAG heartbeat error, re-registering");
+                            break; // break inner loop to re-register
+                        }
+                    }
                 }
-                servers.push(acp_sdk::McpServer::Stdio(s));
             }
-        } else {
-            let url_val = mcp_cfg.url.clone()
-                .or_else(|| mcp_cfg.server_url_camel.clone())
-                .or_else(|| mcp_cfg.server_url_snake.clone());
-            if let Some(u) = url_val {
-                if ty == "sse" {
-                    servers.push(acp_sdk::McpServer::Sse(acp_sdk::McpServerSse::new(name, u)));
-                } else {
-                    servers.push(acp_sdk::McpServer::Http(acp_sdk::McpServerHttp::new(name, u)));
-                }
+            Ok(resp) => {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                tracing::warn!(
+                    status = %status,
+                    body = %body,
+                    "Failed to register with remote RAG, retrying in 30s"
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "Error registering with remote RAG, retrying in 30s"
+                );
             }
         }
-    }
 
-    Ok(servers)
-}
-
-fn mcp_expects_response(value: &JsonValue) -> bool {
-    match value {
-        JsonValue::Object(map) => map.get("id").map(|id| !id.is_null()).unwrap_or(false),
-        JsonValue::Array(items) => items.iter().any(|item| {
-            item.as_object()
-                .and_then(|map| map.get("id"))
-                .map(|id| !id.is_null())
-                .unwrap_or(false)
-        }),
-        _ => false,
+        tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
     }
 }
 
@@ -1319,7 +1290,7 @@ pub async fn run_daemon(config: Config) -> Result<()> {
         session_event_sink,
         start_time: std::sync::atomic::AtomicI64::new(chrono::Utc::now().timestamp()),
         local_start_tx,
-        topics: DashMap::new(),
+        session_manager: SessionManager::new(),
         pending_permissions: Arc::new(DashMap::new()),
         mdns: std::sync::Mutex::new(None),
     });
@@ -1339,6 +1310,14 @@ pub async fn run_daemon(config: Config) -> Result<()> {
                     tracing::warn!("Failed to start mDNS advertising: {err}");
                 }
             }
+
+            if config.rag_register_url.is_some() {
+                let config = config.clone();
+                let port = addr.port();
+                tokio::task::spawn_local(async move {
+                    run_rag_registration(config, port).await;
+                });
+            }
         }
 
         tokio::task::spawn_local(async move {
@@ -1353,6 +1332,8 @@ pub async fn run_daemon(config: Config) -> Result<()> {
                 tracing::error!("Websocket server error: {err}");
             }
         });
+    } else if config.rag_register_url.is_some() {
+        tracing::warn!("RAG registration URL provided but websocket_bind is not set. RAG registration requires an active websocket server.");
     }
 
     let local_daemon = daemon.clone();
@@ -1389,21 +1370,24 @@ pub async fn run_daemon(config: Config) -> Result<()> {
                         path,
                         prompt,
                         agent,
-                    } => match daemon
-                        .spawn_session(path.to_string_lossy().to_string(), prompt, agent)
-                        .await
-                    {
-                        Ok((acp_session_id, thread_id)) => DaemonResponse::SessionCreated {
-                            acp_session_id,
-                            topic_url: format!(
-                                "https://t.me/c/{}/{}",
-                                daemon.config.chat_id, thread_id
-                            ),
-                        },
-                        Err(e) => DaemonResponse::Error {
-                            message: e.to_string(),
-                        },
-                    },
+                    } => {
+                        let path = daemon.resolve_project_path(path);
+                        match daemon
+                            .spawn_session(path.to_string_lossy().to_string(), prompt, agent)
+                            .await
+                        {
+                            Ok((acp_session_id, thread_id)) => DaemonResponse::SessionCreated {
+                                acp_session_id,
+                                topic_url: format!(
+                                    "https://t.me/c/{}/{}",
+                                    daemon.config.chat_id, thread_id
+                                ),
+                            },
+                            Err(e) => DaemonResponse::Error {
+                                message: e.to_string(),
+                            },
+                        }
+                    }
                     DaemonCommand::McpMessage {
                         session_id,
                         payload,
@@ -1415,7 +1399,7 @@ pub async fn run_daemon(config: Config) -> Result<()> {
                     },
                     DaemonCommand::ListSessions => {
                         let mut sessions = Vec::new();
-                        for entry in daemon.topics.iter() {
+                        for entry in daemon.session_manager.topics.iter() {
                             let thread_id = *entry.key();
                             let topic = entry.value();
                             if let Some(active) = &topic.active {
@@ -1452,7 +1436,7 @@ pub async fn run_daemon(config: Config) -> Result<()> {
 
         // Insert topic entries with history (active=None initially)
         for pt in &persisted {
-            daemon.topics.insert(
+            daemon.session_manager.topics.insert(
                 pt.thread_id,
                 TopicEntry {
                     active: None,
@@ -1488,7 +1472,7 @@ pub async fn run_daemon(config: Config) -> Result<()> {
             }
         }
         // Re-persist to update any sessions that got new ACP IDs from fallback
-        daemon.persist_topics().await;
+        daemon.session_manager.persist_topics().await;
     }
 
     // Run Telegram bot (blocks)

@@ -37,6 +37,7 @@ impl Command for CommandCommand {
 
         let command_tx = ctx
             .daemon
+            .session_manager
             .get_session_command_tx_by_thread(thread_id)
             .context("No active session in this topic")?;
         command_tx

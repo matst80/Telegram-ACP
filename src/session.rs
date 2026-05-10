@@ -7,11 +7,7 @@ use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, MessageId, Par
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::formatting;
-use crate::handlers::draft::DraftHandler;
-use crate::handlers::plan::PlanHandler;
-use crate::handlers::tool_call::ToolCallHandler;
-use crate::handlers::working::WorkingHandler;
-use crate::handlers::{EventContext, EventHandler};
+use crate::handlers::EventContext;
 use crate::relay::{SessionEvent, SessionEventSink};
 use crate::session_control::{build_control_state, SessionCommand};
 use crate::session_log::{self, with_session_context, TranscriptDirection};
@@ -365,11 +361,8 @@ pub async fn run_event_consumer(
     available_commands_cache: Arc<Mutex<Vec<acp::AvailableCommand>>>,
 ) {
     sess_info!("Event consumer started");
-    let mut ctx = EventContext::new(bot, chat_id, thread_id);
-    let mut draft = DraftHandler::new();
-    let mut working = WorkingHandler::new();
-    let mut tool_call = ToolCallHandler::new();
-    let mut plan = PlanHandler::new();
+    let mut ctx = EventContext::for_telegram(bot, chat_id, thread_id);
+    let mut consumer = crate::handlers::SessionEventConsumer::new();
 
     while let Some(event) = event_rx.recv().await {
         // AvailableCommandsUpdate: just update cache
@@ -380,56 +373,10 @@ pub async fn run_event_consumer(
             }
         }
 
-        // Text chunks → draft handler (streaming)
-        if draft.handle(&event, &mut ctx).await {
-            working.dismiss(&mut ctx).await;
-            continue;
-        }
-
-        // Non-text event: flush accumulated draft
-        draft.flush(&mut ctx).await;
-
-        // Dismiss working indicator for non-Working events
-        if !matches!(event, AgentEvent::Working) {
-            working.dismiss(&mut ctx).await;
-        }
-
-        // Dispatch to handlers
-        if working.handle(&event, &mut ctx).await {
-            continue;
-        }
-        if tool_call.handle(&event, &mut ctx).await {
-            continue;
-        }
-        if plan.handle(&event, &mut ctx).await {
-            continue;
-        }
-
-        // Inline: simple events
-        match event {
-            AgentEvent::Update(update) => {
-                if let acp::SessionUpdate::UsageUpdate(_usage) = update.as_ref() {
-                    // Usage updates are a bit noisy, we don't send it now
-                    // let text = formatting::format_text_message(&format_usage_update(&usage));
-                    // ctx.send_html_chunks(&text, true).await;
-                }
-            }
-            AgentEvent::Finished { content } => {
-                ctx.send_html_chunks(&formatting::format_completion(&content, None), false)
-                    .await;
-                tool_call.reset(&mut ctx).await;
-            }
-            AgentEvent::Error { content } => {
-                ctx.send_html_chunks(&formatting::format_error(&content), false)
-                    .await;
-                tool_call.reset(&mut ctx).await;
-            }
-            _ => {}
-        }
+        consumer.handle_event(&event, &mut ctx).await;
     }
 
-    draft.flush(&mut ctx).await;
-    ctx.close_topic().await;
+    consumer.finish(&mut ctx).await;
     sess_info!("Event consumer finished");
 }
 

@@ -29,6 +29,11 @@ pub struct Config {
     pub agents: HashMap<String, String>,
     pub websocket_history_limit: usize,
     pub mcp_servers: HashMap<String, FileMcpServerConfig>,
+    pub rag_register_url: Option<String>,
+    pub rag_token: Option<String>,
+    pub rag_register_name: Option<String>,
+    pub rag_register_host: Option<String>,
+    pub project_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -43,6 +48,11 @@ struct FileConfig {
     default_agent: Option<String>,
     #[serde(alias = "mcpServers")]
     mcp_servers: Option<HashMap<String, FileMcpServerConfig>>,
+    rag_register_url: Option<String>,
+    rag_token: Option<String>,
+    rag_register_name: Option<String>,
+    rag_register_host: Option<String>,
+    pub project_root: Option<PathBuf>,
     #[serde(flatten)]
     extra_tables: HashMap<String, toml::Table>,
 }
@@ -111,6 +121,18 @@ impl Config {
 
         let mcp_servers = file_config.mcp_servers.unwrap_or_default();
 
+        let rag_register_url = env_or("TELEGRAM_ACP_RAG_REGISTER_URL", file_config.rag_register_url);
+        let rag_token = env_or("TELEGRAM_ACP_RAG_TOKEN", file_config.rag_token);
+        let rag_register_name = env_or("TELEGRAM_ACP_RAG_REGISTER_NAME", file_config.rag_register_name);
+        let rag_register_host = env_or("TELEGRAM_ACP_RAG_REGISTER_HOST", file_config.rag_register_host);
+        let project_root = env_or(
+            "TELEGRAM_ACP_PROJECT_ROOT",
+            file_config
+                .project_root
+                .map(|p| p.to_string_lossy().into_owned()),
+        )
+        .map(PathBuf::from);
+
         Ok(Config {
             bot_token,
             chat_id,
@@ -122,6 +144,11 @@ impl Config {
             agents,
             websocket_history_limit,
             mcp_servers,
+            rag_register_url,
+            rag_token,
+            rag_register_name,
+            rag_register_host,
+            project_root,
         })
     }
 

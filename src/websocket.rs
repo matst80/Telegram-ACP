@@ -120,7 +120,7 @@ async fn handle_connection(
     Ok(())
 }
 
-fn get_local_ip() -> String {
+pub fn get_local_ip() -> String {
     if let Ok(interfaces) = if_addrs::get_if_addrs() {
         let mut ips = Vec::new();
         for iface in interfaces {

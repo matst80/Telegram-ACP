@@ -119,7 +119,7 @@ async fn handle_topic_message(
     daemon: &DaemonHandle,
 ) -> anyhow::Result<()> {
     let thread = thread_id.0 .0;
-    let Some(command_tx) = daemon.get_session_command_tx_by_thread(thread) else {
+    let Some(command_tx) = daemon.session_manager.get_session_command_tx_by_thread(thread) else {
         return Ok(());
     };
 
@@ -129,7 +129,7 @@ async fn handle_topic_message(
         .session_event_sink
         .publish(SessionEvent::UserPrompt {
             thread_id: Some(thread),
-            acp_session_id: daemon.get_acp_session_id_by_thread(thread),
+            acp_session_id: daemon.session_manager.get_acp_session_id_by_thread(thread),
             text,
             content: content.clone(),
         })

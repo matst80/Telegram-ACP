@@ -84,7 +84,7 @@ impl DraftHandler {
             kind,
         });
         d.text.push_str(text);
-        if let Err(e) = send_streaming_draft(ctx, d.draft_id, &d.text).await {
+        if let Err(e) = ctx.send_draft(d.draft_id, &d.text).await {
             sess_warn!(
                 "Draft message update failed ({} bytes): {}",
                 d.text.len(),
@@ -92,42 +92,6 @@ impl DraftHandler {
             );
         }
     }
-}
-
-/// Send a streaming draft update via the raw Telegram Bot API (sendMessageDraft).
-/// Non-blocking: skips if within the throttle window.
-async fn send_streaming_draft(
-    ctx: &mut EventContext,
-    draft_id: i64,
-    text: &str,
-) -> anyhow::Result<()> {
-    if !ctx.throttle.try_turn() {
-        return Ok(());
-    }
-    let client = ctx.bot.client();
-    let token = ctx.bot.token();
-    let url = format!("https://api.telegram.org/bot{token}/sendMessageDraft");
-    let telegram_text = formatting::markdown_to_telegram_md_v2(text);
-    let draft_text = formatting::truncate_message(&telegram_text, 4096);
-
-    let mut body = serde_json::json!({
-        "chat_id": ctx.chat_id.0,
-        "draft_id": draft_id,
-        "text": draft_text,
-        "parse_mode": "MarkdownV2",
-    });
-
-    if ctx.thread_id != 0 {
-        body["message_thread_id"] = serde_json::json!(ctx.thread_id);
-    }
-
-    let resp = client.post(&url).json(&body).send().await?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body_text = resp.text().await.unwrap_or_default();
-        anyhow::bail!("sendMessageDraft failed ({status}): {body_text}");
-    }
-    Ok(())
 }
 
 fn extract_text(content: &acp::ContentBlock) -> String {

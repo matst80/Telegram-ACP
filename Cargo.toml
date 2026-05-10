@@ -6,6 +6,7 @@ default-run = "telegram-acp"
 license = "MIT"
 repository = "https://github.com/SuperKenVery/telegram-acp"
 description = "Bridge Telegram and ACP coding agents"
+publish = ["k6n"]
 
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }.tar.gz"
@@ -19,7 +20,7 @@ anyhow = "1"
 async-trait = "0.1"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 dashmap = "6"
 futures = "0.3"
 rmcp = { version = "1.2", features = ["server", "macros"] }

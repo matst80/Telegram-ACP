@@ -63,7 +63,7 @@ impl Command for ApprovalCommand {
                 _ => return Ok(false),
             };
 
-            if let Some(command_tx) = ctx.daemon.get_session_command_tx_by_thread(thread_id) {
+            if let Some(command_tx) = ctx.daemon.session_manager.get_session_command_tx_by_thread(thread_id) {
                 let _ = command_tx.send(SessionCommand::SetPermissionHandling { handling });
 
                 ctx.bot

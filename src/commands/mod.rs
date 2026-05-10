@@ -205,6 +205,7 @@ pub(super) async fn get_control_state(
     thread_id: i32,
 ) -> Result<SessionControlState> {
     let entry = daemon
+        .session_manager
         .topics
         .get(&thread_id)
         .and_then(|t| t.active.as_ref().map(|s| s.control_state.clone()))
@@ -219,6 +220,7 @@ pub(super) async fn set_permission_mode(
     mode_id: &str,
 ) -> Result<SessionControlState> {
     let (command_tx, control_state) = daemon
+        .session_manager
         .topics
         .get(&thread_id)
         .and_then(|t| {
@@ -250,6 +252,7 @@ pub(super) async fn set_config_option(
     value_id: &str,
 ) -> Result<SessionControlState> {
     let (command_tx, control_state) = daemon
+        .session_manager
         .topics
         .get(&thread_id)
         .and_then(|t| {

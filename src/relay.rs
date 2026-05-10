@@ -8,6 +8,12 @@ use tokio::sync::{broadcast, mpsc, Mutex};
 use crate::types::AgentEvent;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectInfo {
+    pub name: String,
+    pub path: std::path::PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionEvent {
     UserPrompt {
@@ -41,8 +47,24 @@ pub enum SessionEvent {
         args: serde_json::Value,
         request_id: String,
     },
+    TelegramThreadBound {
+        session_id: String,
+        thread_id: i32,
+        name: String,
+        created: bool,
+    },
+    Error {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        in_reply_to: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        code: String,
+        message: String,
+    },
     Snapshot {
         sessions: Vec<crate::types::SessionInfo>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        projects: Vec<ProjectInfo>,
     },
 }
 
@@ -94,7 +116,7 @@ pub enum WebSocketCommand {
         #[serde(default)]
         thread_id: Option<i32>,
         #[serde(default)]
-        metadata: Option<serde_json::Value>,
+        _metadata: Option<serde_json::Value>,
     },
     EndSession {
         #[serde(default)]
@@ -111,6 +133,8 @@ pub enum WebSocketCommand {
         session_id: Option<String>,
         #[serde(default)]
         thread_id: Option<i32>,
+        #[serde(default)]
+        name: Option<String>,
     },
     ListSessions,
 }

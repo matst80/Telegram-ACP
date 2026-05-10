@@ -1,12 +1,11 @@
 use agent_client_protocol as acp;
-use teloxide::types::MessageId;
 
-use super::{EventContext, EventHandler};
+use super::{EventContext, EventHandler, OutputRef};
 use crate::formatting;
 use crate::types::AgentEvent;
 
 pub struct PlanHandler {
-    message_id: Option<MessageId>,
+    message_id: Option<OutputRef>,
 }
 
 impl PlanHandler {
@@ -45,9 +44,9 @@ impl EventHandler for PlanHandler {
         }
 
         // Send new plan message and pin it
-        if let Some(sent) = ctx.send_html(&formatted, true).await {
-            self.message_id = Some(sent.id);
-            ctx.pin_msg(sent.id).await;
+        if let Some(id) = ctx.send_html(&formatted, true).await {
+            self.message_id = Some(id);
+            ctx.pin_msg(id).await;
         }
         true
     }

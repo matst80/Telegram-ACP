@@ -33,6 +33,7 @@ impl Command for NewCommand {
                 } else {
                     let existing_path = ctx
                         .daemon
+                        .session_manager
                         .get_session_project_path_by_thread(thread_id)
                         .ok_or_else(|| anyhow!("No active session in this topic; provide a path: /new [agent] <project_path>"))?;
                     absolutize_project_path(existing_path)?
@@ -41,7 +42,7 @@ impl Command for NewCommand {
                 // Default to current session's agent when no agent specified
                 let agent = parsed
                     .agent
-                    .or_else(|| ctx.daemon.get_session_agent_by_thread(thread_id));
+                    .or_else(|| ctx.daemon.session_manager.get_session_agent_by_thread(thread_id));
 
                 match ctx
                     .daemon

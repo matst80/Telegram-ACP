@@ -21,6 +21,7 @@ impl Command for StatusCommand {
 
         let topic = ctx
             .daemon
+            .session_manager
             .topics
             .get(&thread_id)
             .ok_or_else(|| anyhow::anyhow!("No topic found for this thread"))?;

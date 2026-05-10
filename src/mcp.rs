@@ -335,7 +335,7 @@ impl McpSession {
         Ok(())
     }
 
-    pub async fn next_response(&self) -> Option<TxJsonRpcMessage<RoleServer>> {
+pub async fn next_response(&self) -> Option<TxJsonRpcMessage<RoleServer>> {
         tracing::debug!(session_id = %self.id, "MCP session: waiting for response");
         let mut rx = self.outgoing_rx.lock().await;
         let result = rx.next().await;
@@ -346,6 +346,64 @@ impl McpSession {
             }
         }
         result
+    }
+}
+
+pub fn build_mcp_servers(
+    mcp_session_id: &str,
+    socket_path: &std::path::Path,
+    config: &crate::config::Config,
+) -> Result<Vec<agent_client_protocol::McpServer>> {
+    let exe_path = std::env::current_exe()
+        .map_err(|e| anyhow!("Failed to resolve current executable: {e}"))?;
+    let args = vec![
+        "mcp-relay".to_string(),
+        "--session".to_string(),
+        mcp_session_id.to_string(),
+        "--socket".to_string(),
+        socket_path.to_string_lossy().to_string(),
+    ];
+    let mut servers = vec![agent_client_protocol::McpServer::Stdio(
+        agent_client_protocol::McpServerStdio::new("telegram-acp-relay", exe_path).args(args),
+    )];
+
+    for (name, mcp_cfg) in &config.mcp_servers {
+        let ty = mcp_cfg.r#type.as_deref().unwrap_or("").to_lowercase();
+        if ty == "stdio" || mcp_cfg.command.is_some() {
+            if let Some(cmd) = &mcp_cfg.command {
+                let mut s = agent_client_protocol::McpServerStdio::new(name, cmd);
+                if let Some(args) = &mcp_cfg.args {
+                    s = s.args(args.clone());
+                }
+                servers.push(agent_client_protocol::McpServer::Stdio(s));
+            }
+        } else {
+            let url_val = mcp_cfg.url.clone()
+                .or_else(|| mcp_cfg.server_url_camel.clone())
+                .or_else(|| mcp_cfg.server_url_snake.clone());
+            if let Some(u) = url_val {
+                if ty == "sse" {
+                    servers.push(agent_client_protocol::McpServer::Sse(agent_client_protocol::McpServerSse::new(name, u)));
+                } else {
+                    servers.push(agent_client_protocol::McpServer::Http(agent_client_protocol::McpServerHttp::new(name, u)));
+                }
+            }
+        }
+    }
+
+    Ok(servers)
+}
+
+pub fn mcp_expects_response(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(map) => map.get("id").map(|id| !id.is_null()).unwrap_or(false),
+        serde_json::Value::Array(items) => items.iter().any(|item| {
+            item.as_object()
+                .and_then(|map| map.get("id"))
+                .map(|id| !id.is_null())
+                .unwrap_or(false)
+        }),
+        _ => false,
     }
 }
 

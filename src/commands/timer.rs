@@ -27,8 +27,10 @@ impl Command for TimerCommand {
         let args = parse_timer_args(ctx.args)?;
         let command_tx = ctx
             .daemon
+            .session_manager
             .get_session_command_tx_by_thread(thread_id)
-            .ok_or_else(|| anyhow!("No active session in this topic"))?;
+            .ok_or_else(|| anyhow::anyhow!("No active session in this topic"))?;
+
 
         let prompt = args.prompt.clone();
         let repeat = args.repeat;
