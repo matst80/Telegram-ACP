@@ -1222,9 +1222,25 @@ async fn run_rag_registration(config: Config, actual_port: u16) {
 
                     match res {
                         Ok(resp) if resp.status().is_success() => {
+                            #[derive(serde::Deserialize)]
+                            struct HeartbeatResp {
+                                #[serde(default)]
+                                refreshed: bool,
+                            }
                             let body = resp.text().await.unwrap_or_default();
-                            if body.trim() == "false" {
-                                tracing::warn!("RAG heartbeat returned false (not registered), re-registering");
+                            // Server responds with JSON `{"refreshed": bool}`
+                            // (legacy daemons read the raw `"false"` string —
+                            // that contract was dropped). When parsing fails
+                            // or refreshed is false, the registry on the
+                            // server side has forgotten us — re-register.
+                            let refreshed = serde_json::from_str::<HeartbeatResp>(&body)
+                                .map(|r| r.refreshed)
+                                .unwrap_or(false);
+                            if !refreshed {
+                                tracing::warn!(
+                                    body = %body,
+                                    "RAG heartbeat returned refreshed=false, re-registering"
+                                );
                                 break;
                             }
                             tracing::info!("RAG heartbeat sent successfully");
