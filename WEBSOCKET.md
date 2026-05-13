@@ -20,6 +20,7 @@ All messages sent by the server are JSON objects with a `type` field at the top 
 | `agent_update` | Agent activity (thinking, typing, tool calls) | Server -> Client |
 | `session_switched` | Active session in a topic was changed | Server -> Client |
 | `session_ended` | Agent session terminated | Server -> Client |
+| `session_removed` | Agent session and topic removed | Server -> Client |
 | `send_prompt` | Send a command to the agent | Client -> Server |
 | `cancel` | Interrupt current agent task | Client -> Server |
 
@@ -156,13 +157,13 @@ Broadcast when a user sends a message via Telegram.
 
 ---
 
-### 4. `session_started` / `session_switched` / `session_ended`
-Broadcast when a session begins, is resumed, or terminates.
+### 4. `session_started` / `session_switched` / `session_ended` / `session_removed`
+Broadcast when a session begins, is resumed, terminates, or is removed.
 
 **Structure:**
 ```json
 {
-  "type": "session_started | session_switched | session_ended",
+  "type": "session_started | session_switched | session_ended | session_removed",
   "thread_id": "number",
   "acp_session_id": "string | null"
 }
