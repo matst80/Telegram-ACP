@@ -77,6 +77,8 @@ pub struct SessionRecord {
     pub agent_name: Option<String>,
     pub created_at: DateTime<Utc>,
     pub last_updated_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history: Vec<crate::relay::SessionEvent>,
 }
 
 // === Agent Events (sent from ACP Client impl to Telegram sender) ===

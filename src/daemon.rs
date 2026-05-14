@@ -218,6 +218,7 @@ impl crate::relay::WebSocketCommandHandler for DaemonHandle {
                     Some(agent_name),
                     None,
                     false,
+                    Vec::new(),
                 )
                 .await?;
             }
@@ -440,6 +441,7 @@ pub struct StartSessionRequest {
     existing_acp_session_id: Option<String>,
     /// Whether the session start request is initiated via `/switch` command in telegram.
     initiated_via_switch: bool,
+    initial_history: Vec<SessionEvent>,
     result_tx: oneshot::Sender<Result<String>>,
 }
 
@@ -576,6 +578,7 @@ impl DaemonHandle {
                 Some(agent_name),
                 None,
                 false,
+                Vec::new(),
             )
             .await
         {
@@ -645,6 +648,7 @@ impl DaemonHandle {
             Some(agent_name),
             None,
             false,
+            Vec::new(),
         )
         .await
     }
@@ -667,6 +671,7 @@ impl DaemonHandle {
             record.agent_name.clone(),
             Some(record.acp_session_id.clone()),
             true,
+            record.history.clone(),
         )
         .await
     }
@@ -691,6 +696,7 @@ impl DaemonHandle {
                 record.agent_name.clone(),
                 Some(record.acp_session_id.clone()),
                 false,
+                record.history.clone(),
             )
             .await?;
 
@@ -721,6 +727,7 @@ impl DaemonHandle {
         agent_name: Option<String>,
         existing_acp_session_id: Option<String>,
         initiated_via_switch: bool,
+        initial_history: Vec<SessionEvent>,
     ) -> Result<String> {
         let (result_tx, result_rx) = oneshot::channel();
         self.local_start_tx
@@ -731,6 +738,7 @@ impl DaemonHandle {
                 agent_name,
                 existing_acp_session_id,
                 initiated_via_switch,
+                initial_history,
                 result_tx,
             })
             .map_err(|_| anyhow::anyhow!("Daemon session starter is unavailable"))?;
@@ -750,6 +758,7 @@ impl DaemonHandle {
         agent_name: Option<String>,
         existing_acp_session_id: Option<String>,
         initiated_via_switch: bool,
+        initial_history: Vec<SessionEvent>,
     ) -> Result<String> {
         // Channels
         let (command_tx, command_rx) = mpsc::unbounded_channel::<SessionCommand>();
@@ -758,6 +767,15 @@ impl DaemonHandle {
         let available_commands = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let (history_sink, history) =
             crate::relay::HistorySessionEventSink::new(self.config.websocket_history_limit);
+        
+        // Seed initial history
+        {
+            let mut h = history.lock().await;
+            for event in initial_history {
+                h.push_back(event);
+            }
+        }
+
         let session_event_sink: Arc<dyn SessionEventSink> =
             Arc::new(MultiSessionEventSink::new(vec![
                 self.session_event_sink.clone(),
@@ -937,6 +955,7 @@ impl DaemonHandle {
             agent_name: agent_name.clone(),
             created_at: now,
             last_updated_at: now,
+            history: Vec::new(),
         };
 
         // Get or create TopicEntry, set active, append to history
@@ -1477,6 +1496,7 @@ pub async fn run_daemon(config: Config) -> Result<()> {
                         req.agent_name,
                         req.existing_acp_session_id,
                         req.initiated_via_switch,
+                        req.initial_history,
                     )
                     .await;
                 let _ = req.result_tx.send(res);
@@ -1610,7 +1630,17 @@ pub async fn run_daemon(config: Config) -> Result<()> {
 
     // Run Telegram bot (blocks)
     daemon.start_time.store(chrono::Utc::now().timestamp(), std::sync::atomic::Ordering::Relaxed);
-    telegram::run_bot(bot, daemon).await;
+    
+    let d = daemon.clone();
+    tokio::select! {
+        _ = telegram::run_bot(bot, daemon) => {
+            tracing::info!("Bot dispatcher exited");
+        },
+        _ = tokio::signal::ctrl_c() => {
+            tracing::info!("Received Ctrl+C, persisting topics...");
+            d.session_manager.persist_topics().await;
+        }
+    }
 
     Ok(())
 }

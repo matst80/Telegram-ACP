@@ -198,11 +198,22 @@ impl SessionManager {
             let thread_id = *entry.key();
             let topic = entry.value();
             let active_session_id = topic.active.as_ref().and_then(|s| s.acp_session_id.clone());
+
+            let mut sessions = topic.history.clone();
+            if let Some(active) = &topic.active {
+                if let Some(sid) = &active.acp_session_id {
+                    if let Some(record) = sessions.iter_mut().find(|r| &r.acp_session_id == sid) {
+                        let history = active.history.lock().await;
+                        record.history = history.iter().cloned().collect();
+                    }
+                }
+            }
+
             persisted.push(crate::persistence::PersistedTopic {
                 thread_id,
                 name: topic.name.clone(),
                 active_session_id,
-                sessions: topic.history.clone(),
+                sessions,
             });
         }
         if let Err(e) = crate::persistence::save_topics(&persisted) {
