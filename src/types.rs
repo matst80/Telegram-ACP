@@ -43,7 +43,7 @@ pub struct SessionInfo {
     pub acp_session_id: String,
     pub project_path: PathBuf,
     pub status: SessionStatus,
-    pub thread_id: i32,
+    pub thread_id: Option<i32>,
     pub name: Option<String>,
     pub agent_command: String,
     pub agent_name: Option<String>,

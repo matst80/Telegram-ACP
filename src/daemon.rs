@@ -105,7 +105,7 @@ impl SessionStateProvider for DaemonHandle {
                     acp_session_id,
                     project_path: active.project_path.clone(),
                     status,
-                    thread_id,
+                    thread_id: Some(thread_id),
                     name,
                     agent_command: active.agent_command.clone(),
                     agent_name: active.agent_name.clone(),
@@ -310,7 +310,7 @@ impl crate::relay::WebSocketCommandHandler for DaemonHandle {
                 };
 
                 if let Some((_, mut topic_entry)) = self.session_manager.topics.remove(&okey) {
-                    if let Some(mut active) = topic_entry.active.take() {
+                    if let Some(active) = topic_entry.active.take() {
                         active.telegram_thread_id.store(resolved_tid, std::sync::atomic::Ordering::Relaxed);
                         *active.name.lock().await = Some(resolved_name.clone());
                         
@@ -365,8 +365,7 @@ impl crate::relay::WebSocketCommandHandler for DaemonHandle {
                         let _ = self.bot.edit_forum_topic(
                             ChatId(self.config.chat_id),
                             teloxide::types::ThreadId(teloxide::types::MessageId(tid)),
-                            &name,
-                        ).await;
+                        ).name(&name).await;
                     }
                 }
             }

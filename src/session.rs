@@ -1,5 +1,4 @@
-use acp::Agent;
-use agent_client_protocol as acp;
+use crate::acp::{self, Agent, CommandExt};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use teloxide::prelude::*;
