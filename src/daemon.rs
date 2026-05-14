@@ -127,11 +127,39 @@ impl crate::relay::WebSocketCommandHandler for DaemonHandle {
                 let tx = self.session_manager
                     .resolve_session_tx(thread_id, session_id.clone())
                     .ok_or_else(|| anyhow::anyhow!("No active session found"))?;
-                tx.send(SessionCommand::Prompt(vec![
+                
+                // Publish UserPrompt event to history using the session's sink
+                let resolved_tid = self.session_manager.resolve_thread_id(thread_id, session_id.clone());
+                let resolved_sid = session_id.or_else(|| {
+                    resolved_tid.and_then(|tid| self.session_manager.get_acp_session_id_by_thread(tid))
+                });
+                
+                let content = vec![
                     agent_client_protocol::ContentBlock::Text(
-                        agent_client_protocol::TextContent::new(text),
+                        agent_client_protocol::TextContent::new(text.clone()),
                     ),
-                ]))
+                ];
+
+                if let Some(tid) = resolved_tid {
+                    if let Some(sink) = self.session_manager.get_session_event_sink_by_thread(tid) {
+                        sink.publish(SessionEvent::UserPrompt {
+                            thread_id: Some(tid),
+                            acp_session_id: resolved_sid,
+                            text,
+                            content: content.clone(),
+                        }).await;
+                    }
+                } else {
+                    // Fallback to global sink if no thread context (shouldn't happen for active sessions)
+                    self.session_event_sink.publish(SessionEvent::UserPrompt {
+                        thread_id: None,
+                        acp_session_id: resolved_sid,
+                        text,
+                        content: content.clone(),
+                    }).await;
+                }
+
+                tx.send(SessionCommand::Prompt(content))
                 .map_err(|_| anyhow::anyhow!("Failed to send prompt to session"))?;
             }
             crate::relay::WebSocketCommand::Cancel { thread_id, session_id } => {

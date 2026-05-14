@@ -152,15 +152,17 @@ async fn handle_topic_message(
 
     let text = crate::session::extract_text_from_content(&content);
 
-    daemon
-        .session_event_sink
-        .publish(SessionEvent::UserPrompt {
-            thread_id: Some(thread),
-            acp_session_id: daemon.session_manager.get_acp_session_id_by_thread(thread),
-            text,
-            content: content.clone(),
-        })
-        .await;
+    let Some(sink) = daemon.session_manager.get_session_event_sink_by_thread(thread) else {
+        return Ok(());
+    };
+
+    sink.publish(SessionEvent::UserPrompt {
+        thread_id: Some(thread),
+        acp_session_id: daemon.session_manager.get_acp_session_id_by_thread(thread),
+        text,
+        content: content.clone(),
+    })
+    .await;
 
     command_tx
         .send(SessionCommand::Prompt(content))

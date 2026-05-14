@@ -110,6 +110,17 @@ impl SessionManager {
         Some(commands)
     }
 
+    pub fn get_session_event_sink_by_thread(
+        &self,
+        thread_id: i32,
+    ) -> Option<Arc<dyn crate::relay::SessionEventSink>> {
+        self.topics
+            .get(&thread_id)?
+            .active
+            .as_ref()
+            .map(|e| e.event_sink.clone())
+    }
+
     pub fn resolve_session_tx(
         &self,
         thread_id: Option<i32>,
