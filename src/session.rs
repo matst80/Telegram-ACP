@@ -159,6 +159,42 @@ pub async fn run_session_runtime(
                         }
                         *control_state.lock().await = build_control_state(&mode_state, &config_options, handling);
                     }
+                    Some(SessionCommand::ExecuteCommand {
+                        command_id,
+                        arguments,
+                        result_tx,
+                    }) => {
+                        sess_info!("Executing command: {}", command_id);
+                        let request = acp::CommandRequest::new(
+                            acp_session_id.clone(),
+                            command_id,
+                            arguments,
+                        );
+                        if let Some(ctx) = session_log::try_current_session_context() {
+                            if let Err(err) = ctx.log().log_acp_payload(
+                                TranscriptDirection::ToAgent,
+                                &serde_json::json!({ "method": "command", "params": &request }),
+                            ) {
+                                sess_warn!("Failed to record command request: {err}");
+                            }
+                        }
+                        let result = conn
+                            .command(request)
+                            .await
+                            .map_err(|e| anyhow::anyhow!("Failed to execute command: {e}"));
+
+                        if let Ok(resp) = &result {
+                            if let Some(ctx) = session_log::try_current_session_context() {
+                                if let Err(err) = ctx.log().log_acp_payload(
+                                    TranscriptDirection::FromAgent,
+                                    &serde_json::json!({ "method": "command", "result": resp }),
+                                ) {
+                                    sess_warn!("Failed to record command response: {err}");
+                                }
+                            }
+                        }
+                        let _ = result_tx.send(result.map(|_| ()));
+                    }
                     None => {
                         command_closed = true;
                     }

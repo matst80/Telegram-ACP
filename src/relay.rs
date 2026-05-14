@@ -61,6 +61,14 @@ pub enum SessionEvent {
         code: String,
         message: String,
     },
+    SessionRenamed {
+        thread_id: i32,
+        acp_session_id: String,
+        name: String,
+    },
+    TopicRemoved {
+        thread_id: i32,
+    },
     Snapshot {
         sessions: Vec<crate::types::SessionInfo>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -135,6 +143,25 @@ pub enum WebSocketCommand {
         thread_id: Option<i32>,
         #[serde(default)]
         name: Option<String>,
+    },
+    RenameSession {
+        #[serde(default)]
+        thread_id: Option<i32>,
+        #[serde(default)]
+        session_id: Option<String>,
+        name: String,
+    },
+    RemoveTopic {
+        thread_id: i32,
+    },
+    ExecuteCommand {
+        #[serde(default)]
+        thread_id: Option<i32>,
+        #[serde(default)]
+        session_id: Option<String>,
+        command_id: String,
+        #[serde(default)]
+        arguments: serde_json::Value,
     },
     ListSessions,
 }

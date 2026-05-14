@@ -98,17 +98,20 @@ impl SessionStateProvider for DaemonHandle {
             if let Some(active) = &topic.active {
                 let status = *active.status.lock().await;
                 let history = active.history.lock().await.iter().cloned().collect();
-                if let Some(acp_session_id) = active.acp_session_id.clone() {
-                    sessions.push(crate::types::SessionInfo {
-                        acp_session_id,
-                        project_path: active.project_path.clone(),
-                        agent_command: active.agent_command.clone(),
-                        agent_name: active.agent_name.clone(),
-                        status,
-                        thread_id: if thread_id > 0 { Some(thread_id) } else { None },
-                        history,
-                    });
-                }
+                let acp_session_id = active.acp_session_id.clone().unwrap_or_default();
+                let name = active.name.lock().await.clone();
+                let available_commands = active.available_commands.lock().await.clone();
+                sessions.push(crate::types::SessionInfo {
+                    acp_session_id,
+                    project_path: active.project_path.clone(),
+                    status,
+                    thread_id,
+                    name,
+                    agent_command: active.agent_command.clone(),
+                    agent_name: active.agent_name.clone(),
+                    available_commands,
+                    history,
+                });
             }
         }
         let projects = self.list_projects();
@@ -303,12 +306,18 @@ impl crate::relay::WebSocketCommandHandler for DaemonHandle {
                 };
 
                 if let Some((_, mut topic_entry)) = self.session_manager.topics.remove(&okey) {
-                    if let Some(active) = topic_entry.active.take() {
+                    if let Some(mut active) = topic_entry.active.take() {
                         active.telegram_thread_id.store(resolved_tid, std::sync::atomic::Ordering::Relaxed);
-                        self.session_manager.topics.entry(resolved_tid).or_insert_with(|| TopicEntry {
+                        *active.name.lock().await = Some(resolved_name.clone());
+                        
+                        let mut new_topic = self.session_manager.topics.entry(resolved_tid).or_insert_with(|| TopicEntry {
+                            name: Some(resolved_name.clone()),
                             active: None,
                             history: Vec::new(),
-                        }).active = Some(active);
+                        });
+                        new_topic.name = Some(resolved_name.clone());
+                        new_topic.active = Some(active);
+                        drop(new_topic);
 
                         // Emit event
                         self.session_event_sink.publish(SessionEvent::TelegramThreadBound {
@@ -319,6 +328,66 @@ impl crate::relay::WebSocketCommandHandler for DaemonHandle {
                         }).await;
                     }
                 }
+            }
+            crate::relay::WebSocketCommand::RenameSession { thread_id, session_id, name } => {
+                let tid = self.session_manager.resolve_thread_id(thread_id, session_id.clone());
+                let mut sid = session_id;
+                let mut event_sink = self.session_event_sink.clone();
+                
+                if let Some(tid) = tid {
+                    if let Some(mut topic) = self.session_manager.topics.get_mut(&tid) {
+                        topic.name = Some(name.clone());
+                        if let Some(active) = &topic.active {
+                            *active.name.lock().await = Some(name.clone());
+                            if sid.is_none() {
+                                sid = active.acp_session_id.clone();
+                            }
+                            event_sink = active.event_sink.clone();
+                        }
+                    }
+                    
+                    let resolved_sid = sid.unwrap_or_default();
+                    
+                    event_sink.publish(SessionEvent::SessionRenamed {
+                        thread_id: tid,
+                        acp_session_id: resolved_sid,
+                        name: name.clone(),
+                    }).await;
+                    
+                    self.session_manager.persist_topics().await;
+                    
+                    // Rename telegram topic if it exists
+                    if tid > 0 {
+                        let _ = self.bot.edit_forum_topic(
+                            ChatId(self.config.chat_id),
+                            teloxide::types::ThreadId(teloxide::types::MessageId(tid)),
+                            &name,
+                        ).await;
+                    }
+                }
+            }
+            crate::relay::WebSocketCommand::RemoveTopic { thread_id } => {
+                if self.remove_topic(thread_id).await.is_some() {
+                    self.session_event_sink.publish(SessionEvent::TopicRemoved { thread_id }).await;
+                }
+            }
+            crate::relay::WebSocketCommand::ExecuteCommand {
+                thread_id,
+                session_id,
+                command_id,
+                arguments,
+            } => {
+                let tx = self.session_manager
+                    .resolve_session_tx(thread_id, session_id)
+                    .ok_or_else(|| anyhow::anyhow!("No active session found"))?;
+                let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+                tx.send(SessionCommand::ExecuteCommand {
+                    command_id,
+                    arguments,
+                    result_tx,
+                })
+                .map_err(|_| anyhow::anyhow!("Failed to send command to session"))?;
+                result_rx.await??;
             }
             crate::relay::WebSocketCommand::ListSessions => {
                 use crate::relay::SessionStateProvider;
@@ -750,6 +819,14 @@ impl DaemonHandle {
                 permission_handling: crate::types::PermissionHandling::Auto,
             },
         ));
+        // Get or create TopicEntry, set active
+        let mut topic = self.session_manager.topics.entry(thread_id).or_insert_with(|| TopicEntry {
+            name: None,
+            active: None,
+            history: Vec::new(),
+        });
+        let topic_name = topic.name.clone();
+        
         let session_entry = SessionEntry {
             acp_session_id: None, // filled in after init completes
             mcp_session_id: mcp_session_id.clone(),
@@ -758,6 +835,7 @@ impl DaemonHandle {
             project_path: project_path.clone(),
             agent_command: agent_cmd.clone(),
             agent_name: agent_name.clone(),
+            name: Arc::new(tokio::sync::Mutex::new(topic_name)),
             status: status.clone(),
             available_commands: available_commands.clone(),
             control_state: control_state.clone(),
@@ -765,15 +843,11 @@ impl DaemonHandle {
             command_tx: command_tx.clone(),
             cancel_tx: cancel_tx.clone(),
             history: history.clone(),
+            event_sink: session_event_sink.clone(),
             telegram_thread_id: thread_id_ref,
         };
-        self.session_manager.topics
-            .entry(thread_id)
-            .or_insert_with(|| TopicEntry {
-                active: None,
-                history: Vec::new(),
-            })
-            .active = Some(session_entry);
+        topic.active = Some(session_entry);
+        drop(topic);
 
         // Create oneshot for receiving the ACP session ID
         let (result_tx, result_rx) = oneshot::channel();
@@ -835,6 +909,7 @@ impl DaemonHandle {
 
         // Get or create TopicEntry, set active, append to history
         let mut topic = self.session_manager.topics.entry(thread_id).or_insert_with(|| TopicEntry {
+            name: None,
             active: None,
             history: Vec::new(),
         });
@@ -1411,13 +1486,17 @@ pub async fn run_daemon(config: Config) -> Result<()> {
                                 let status = *active.status.lock().await;
                                 let history = active.history.lock().await.iter().cloned().collect();
                                 if let Some(acp_session_id) = active.acp_session_id.clone() {
+                                    let name = active.name.lock().await.clone();
+                                    let available_commands = active.available_commands.lock().await.clone();
                                     sessions.push(crate::types::SessionInfo {
                                         acp_session_id,
                                         project_path: active.project_path.clone(),
-                                        agent_command: active.agent_command.clone(),
-                                        agent_name: active.agent_name.clone(),
                                         status,
                                         thread_id: if thread_id > 0 { Some(thread_id) } else { None },
+                                        name,
+                                        agent_command: active.agent_command.clone(),
+                                        agent_name: active.agent_name.clone(),
+                                        available_commands,
                                         history,
                                     });
                                 }
@@ -1444,6 +1523,7 @@ pub async fn run_daemon(config: Config) -> Result<()> {
             daemon.session_manager.topics.insert(
                 pt.thread_id,
                 TopicEntry {
+                    name: pt.name.clone(),
                     active: None,
                     history: pt.sessions.clone(),
                 },
