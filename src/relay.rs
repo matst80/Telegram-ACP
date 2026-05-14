@@ -40,6 +40,9 @@ pub enum SessionEvent {
         thread_id: Option<i32>,
         acp_session_id: Option<String>,
     },
+    SessionRemoved {
+        thread_id: i32,
+    },
     PermissionRequest {
         thread_id: Option<i32>,
         acp_session_id: String,

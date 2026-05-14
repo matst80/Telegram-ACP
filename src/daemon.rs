@@ -204,7 +204,9 @@ impl crate::relay::WebSocketCommandHandler for DaemonHandle {
                 // Also remove it from topics if it's headless (negative ID)
                 if let Some(tid) = thread_id {
                     if tid < 0 {
-                        self.session_manager.topics.remove(&tid);
+                        if self.session_manager.topics.remove(&tid).is_some() {
+                            self.session_event_sink.publish(SessionEvent::SessionRemoved { thread_id: tid }).await;
+                        }
                     }
                 } else if let Some(sid) = session_id {
                     let mut to_remove = None;
@@ -218,7 +220,9 @@ impl crate::relay::WebSocketCommandHandler for DaemonHandle {
                     }
                     if let Some(tid) = to_remove {
                         if tid < 0 {
-                            self.session_manager.topics.remove(&tid);
+                            if self.session_manager.topics.remove(&tid).is_some() {
+                                self.session_event_sink.publish(SessionEvent::SessionRemoved { thread_id: tid }).await;
+                            }
                         }
                     }
                 }
@@ -481,6 +485,7 @@ impl DaemonHandle {
     pub async fn remove_topic(&self, thread_id: i32) -> Option<TopicEntry> {
         let entry = self.session_manager.remove_topic(thread_id).await?;
         self.session_manager.persist_topics().await;
+        self.session_event_sink.publish(SessionEvent::SessionRemoved { thread_id }).await;
         Some(entry)
     }
 
@@ -1297,9 +1302,25 @@ async fn run_rag_registration(config: Config, actual_port: u16) {
 
                     match res {
                         Ok(resp) if resp.status().is_success() => {
+                            #[derive(serde::Deserialize)]
+                            struct HeartbeatResp {
+                                #[serde(default)]
+                                refreshed: bool,
+                            }
                             let body = resp.text().await.unwrap_or_default();
-                            if body.trim() == "false" {
-                                tracing::warn!("RAG heartbeat returned false (not registered), re-registering");
+                            // Server responds with JSON `{"refreshed": bool}`
+                            // (legacy daemons read the raw `"false"` string —
+                            // that contract was dropped). When parsing fails
+                            // or refreshed is false, the registry on the
+                            // server side has forgotten us — re-register.
+                            let refreshed = serde_json::from_str::<HeartbeatResp>(&body)
+                                .map(|r| r.refreshed)
+                                .unwrap_or(false);
+                            if !refreshed {
+                                tracing::warn!(
+                                    body = %body,
+                                    "RAG heartbeat returned refreshed=false, re-registering"
+                                );
                                 break;
                             }
                             tracing::info!("RAG heartbeat sent successfully");
