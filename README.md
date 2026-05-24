@@ -72,6 +72,54 @@ Env overrides are also supported:
 
 When `websocket_bind` is set, the daemon starts a websocket listener and broadcasts each `SessionEvent` as a JSON text frame. The stream includes user prompts, agent updates, and session lifecycle events for every thread.
 
+## Docker
+
+A container image can be built from the included `Dockerfile`. It uses:
+
+- a Rust builder stage to compile `telegram-acp`
+- `matst80/graph-cms-base:latest` as the runtime image
+- the runtime base for Chrome, coding tools, and `x11vnc`
+
+Build it:
+
+```bash
+docker build -t telegram-acp:local .
+```
+
+Run it with a mounted config file:
+
+```bash
+docker run --rm \
+  -p 9001:9001 \
+  -p 5900:5900 \
+  -v "$HOME/.config/telegram-acp:/root/.config/telegram-acp" \
+  -v "$HOME/projects:/workspace" \
+  telegram-acp:local
+```
+
+Or let the image generate a minimal config from env:
+
+```bash
+docker run --rm \
+  -p 9001:9001 \
+  -p 5900:5900 \
+  -e TELEGRAM_ACP_BOT_TOKEN=... \
+  -e TELEGRAM_ACP_CHAT_ID=123456789 \
+  -e TELEGRAM_ACP_DEFAULT_AGENT=codex \
+  -e TELEGRAM_ACP_DEFAULT_AGENT_CMD='codex --acp' \
+  -e TELEGRAM_ACP_PROJECT_ROOT=/workspace \
+  -v "$HOME/projects:/workspace" \
+  telegram-acp:local
+```
+
+Useful environment variables for the container:
+
+- `TELEGRAM_ACP_DEFAULT_AGENT_CMD` to define the agent command when auto-generating config
+- `TELEGRAM_ACP_EXTRA_CONFIG` to append raw TOML to the generated config
+- `TELEGRAM_ACP_WEBSOCKET_BIND` to change the websocket bind address
+- `TELEGRAM_ACP_PROJECT_ROOT` to control the project directory exposed inside the container
+- `TELEGRAM_ACP_RAG_REGISTER_URL`, `TELEGRAM_ACP_RAG_TOKEN`, `TELEGRAM_ACP_RAG_REGISTER_NAME`, `TELEGRAM_ACP_RAG_REGISTER_HOST` for RAG registration
+
 # Hacking
 
 ## How it works
