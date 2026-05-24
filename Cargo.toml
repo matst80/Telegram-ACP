@@ -45,3 +45,5 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
 mdns-sd = "0.13"
 if-addrs = "0.13"
+portable-pty = "0.9"
+vt100 = "0.15"

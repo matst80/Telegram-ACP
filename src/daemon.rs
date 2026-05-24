@@ -7,10 +7,10 @@ use anyhow::Result;
 use chrono::Utc;
 use dashmap::DashMap;
 use futures::future::join_all;
+use reqwest;
 use rmcp::service::RxJsonRpcMessage;
 use rmcp::RoleServer;
 use serde_json::Value as JsonValue;
-use reqwest;
 use telegraph_rs::Telegraph;
 use teloxide::prelude::*;
 use teloxide::types::InputFile;
@@ -29,6 +29,7 @@ use crate::session;
 use crate::session_control::{self, SessionCommand};
 use crate::session_log::{self, with_session_context, SessionContext, SessionLog};
 use crate::telegram;
+use crate::terminal::{TerminalManager, TerminalSpec};
 use crate::types::{AgentEvent, SessionRecord, SessionStatus};
 use crate::{sess_error, sess_info};
 
@@ -45,6 +46,7 @@ pub struct DaemonHandle {
     /// Relay for starting ACP sessions inside the daemon's LocalSet task.
     local_start_tx: mpsc::UnboundedSender<StartSessionRequest>,
     pub session_manager: SessionManager,
+    pub terminal_manager: Arc<TerminalManager>,
     pub pending_permissions: Arc<DashMap<String, oneshot::Sender<acp_sdk::PermissionOptionId>>>,
     pub mdns: std::sync::Mutex<Option<mdns_sd::ServiceDaemon>>,
 }
@@ -86,6 +88,51 @@ impl DaemonHandle {
         }
         path
     }
+
+    fn resolve_terminal_context(
+        &self,
+        thread_id: Option<i32>,
+        session_id: Option<String>,
+    ) -> (Option<i32>, Option<String>, Option<PathBuf>) {
+        let resolved_thread_id = self
+            .session_manager
+            .resolve_thread_id(thread_id, session_id.clone());
+        let resolved_session_id = session_id.or_else(|| {
+            resolved_thread_id
+                .and_then(|tid| self.session_manager.get_acp_session_id_by_thread(tid))
+        });
+        let project_path = resolved_thread_id
+            .and_then(|tid| self.session_manager.get_session_project_path_by_thread(tid));
+        (resolved_thread_id, resolved_session_id, project_path)
+    }
+
+    fn resolve_terminal_cwd(
+        &self,
+        requested_cwd: Option<String>,
+        project_path: Option<PathBuf>,
+    ) -> Result<PathBuf> {
+        let cwd = match requested_cwd {
+            Some(cwd) => {
+                let candidate = PathBuf::from(cwd);
+                if candidate.is_absolute() {
+                    candidate
+                } else if let Some(project_path) = project_path {
+                    project_path.join(candidate)
+                } else {
+                    self.resolve_project_path(candidate)
+                }
+            }
+            None => project_path
+                .or_else(|| self.config.project_root.clone())
+                .unwrap_or(std::env::current_dir()?),
+        };
+
+        if !cwd.is_dir() {
+            anyhow::bail!("Terminal cwd is not a directory: {}", cwd.display());
+        }
+
+        Ok(cwd)
+    }
 }
 
 #[async_trait::async_trait]
@@ -115,7 +162,12 @@ impl SessionStateProvider for DaemonHandle {
             }
         }
         let projects = self.list_projects();
-        vec![SessionEvent::Snapshot { sessions, projects }]
+        let terminals = self.terminal_manager.list();
+        vec![SessionEvent::Snapshot {
+            sessions,
+            projects,
+            terminals,
+        }]
     }
 }
 
@@ -123,22 +175,28 @@ impl SessionStateProvider for DaemonHandle {
 impl crate::relay::WebSocketCommandHandler for DaemonHandle {
     async fn handle_command(&self, command: crate::relay::WebSocketCommand) -> anyhow::Result<()> {
         match command {
-            crate::relay::WebSocketCommand::SendPrompt { thread_id, session_id, text } => {
-                let tx = self.session_manager
+            crate::relay::WebSocketCommand::SendPrompt {
+                thread_id,
+                session_id,
+                text,
+            } => {
+                let tx = self
+                    .session_manager
                     .resolve_session_tx(thread_id, session_id.clone())
                     .ok_or_else(|| anyhow::anyhow!("No active session found"))?;
-                
+
                 // Publish UserPrompt event to history using the session's sink
-                let resolved_tid = self.session_manager.resolve_thread_id(thread_id, session_id.clone());
+                let resolved_tid = self
+                    .session_manager
+                    .resolve_thread_id(thread_id, session_id.clone());
                 let resolved_sid = session_id.or_else(|| {
-                    resolved_tid.and_then(|tid| self.session_manager.get_acp_session_id_by_thread(tid))
+                    resolved_tid
+                        .and_then(|tid| self.session_manager.get_acp_session_id_by_thread(tid))
                 });
-                
-                let content = vec![
-                    agent_client_protocol::ContentBlock::Text(
-                        agent_client_protocol::TextContent::new(text.clone()),
-                    ),
-                ];
+
+                let content = vec![agent_client_protocol::ContentBlock::Text(
+                    agent_client_protocol::TextContent::new(text.clone()),
+                )];
 
                 if let Some(tid) = resolved_tid {
                     if let Some(sink) = self.session_manager.get_session_event_sink_by_thread(tid) {
@@ -147,30 +205,39 @@ impl crate::relay::WebSocketCommandHandler for DaemonHandle {
                             acp_session_id: resolved_sid,
                             text,
                             content: content.clone(),
-                        }).await;
+                        })
+                        .await;
                     }
                 } else {
                     // Fallback to global sink if no thread context (shouldn't happen for active sessions)
-                    self.session_event_sink.publish(SessionEvent::UserPrompt {
-                        thread_id: None,
-                        acp_session_id: resolved_sid,
-                        text,
-                        content: content.clone(),
-                    }).await;
+                    self.session_event_sink
+                        .publish(SessionEvent::UserPrompt {
+                            thread_id: None,
+                            acp_session_id: resolved_sid,
+                            text,
+                            content: content.clone(),
+                        })
+                        .await;
                 }
 
                 tx.send(SessionCommand::Prompt(content))
-                .map_err(|_| anyhow::anyhow!("Failed to send prompt to session"))?;
+                    .map_err(|_| anyhow::anyhow!("Failed to send prompt to session"))?;
             }
-            crate::relay::WebSocketCommand::Cancel { thread_id, session_id } => {
-                let cancel_tx = self.session_manager
+            crate::relay::WebSocketCommand::Cancel {
+                thread_id,
+                session_id,
+            } => {
+                let cancel_tx = self
+                    .session_manager
                     .resolve_session_cancel_tx(thread_id, session_id)
                     .ok_or_else(|| anyhow::anyhow!("No active session found"))?;
                 let (result_tx, result_rx) = tokio::sync::oneshot::channel();
                 cancel_tx
                     .send(result_tx)
                     .map_err(|_| anyhow::anyhow!("Session cancel channel closed"))?;
-                result_rx.await.map_err(|_| anyhow::anyhow!("Cancel request dropped"))??;
+                result_rx
+                    .await
+                    .map_err(|_| anyhow::anyhow!("Cancel request dropped"))??;
             }
             crate::relay::WebSocketCommand::SetConfigOption {
                 thread_id,
@@ -178,7 +245,8 @@ impl crate::relay::WebSocketCommandHandler for DaemonHandle {
                 config_id,
                 value_id,
             } => {
-                let tx = self.session_manager
+                let tx = self
+                    .session_manager
                     .resolve_session_tx(thread_id, session_id)
                     .ok_or_else(|| anyhow::anyhow!("No active session found"))?;
                 let (result_tx, result_rx) = tokio::sync::oneshot::channel();
@@ -190,8 +258,13 @@ impl crate::relay::WebSocketCommandHandler for DaemonHandle {
                 .map_err(|_| anyhow::anyhow!("Failed to send config change to session"))?;
                 result_rx.await??;
             }
-            crate::relay::WebSocketCommand::SetPermissionMode { thread_id, session_id, mode_id } => {
-                let tx = self.session_manager
+            crate::relay::WebSocketCommand::SetPermissionMode {
+                thread_id,
+                session_id,
+                mode_id,
+            } => {
+                let tx = self
+                    .session_manager
                     .resolve_session_tx(thread_id, session_id)
                     .ok_or_else(|| anyhow::anyhow!("No active session found"))?;
                 let (result_tx, result_rx) = tokio::sync::oneshot::channel();
@@ -210,7 +283,8 @@ impl crate::relay::WebSocketCommandHandler for DaemonHandle {
                     -1 - (self.session_manager.topics.len() as i32)
                 });
                 let path = self.resolve_project_path(PathBuf::from(&project_path));
-                let (agent_name, agent_cmd) = self.config.resolve_agent(agent_command.as_deref())?;
+                let (agent_name, agent_cmd) =
+                    self.config.resolve_agent(agent_command.as_deref())?;
                 self.enqueue_start_session(
                     resolved_thread_id,
                     path,
@@ -222,8 +296,12 @@ impl crate::relay::WebSocketCommandHandler for DaemonHandle {
                 )
                 .await?;
             }
-            crate::relay::WebSocketCommand::EndSession { session_id, thread_id } => {
-                let cancel_tx = self.session_manager
+            crate::relay::WebSocketCommand::EndSession {
+                session_id,
+                thread_id,
+            } => {
+                let cancel_tx = self
+                    .session_manager
                     .resolve_session_cancel_tx(thread_id, session_id.clone())
                     .ok_or_else(|| anyhow::anyhow!("No active session found"))?;
                 let (result_tx, result_rx) = tokio::sync::oneshot::channel();
@@ -234,7 +312,9 @@ impl crate::relay::WebSocketCommandHandler for DaemonHandle {
                 if let Some(tid) = thread_id {
                     if tid < 0 {
                         if self.session_manager.topics.remove(&tid).is_some() {
-                            self.session_event_sink.publish(SessionEvent::SessionRemoved { thread_id: tid }).await;
+                            self.session_event_sink
+                                .publish(SessionEvent::SessionRemoved { thread_id: tid })
+                                .await;
                         }
                     }
                 } else if let Some(sid) = session_id {
@@ -250,49 +330,67 @@ impl crate::relay::WebSocketCommandHandler for DaemonHandle {
                     if let Some(tid) = to_remove {
                         if tid < 0 {
                             if self.session_manager.topics.remove(&tid).is_some() {
-                                self.session_event_sink.publish(SessionEvent::SessionRemoved { thread_id: tid }).await;
+                                self.session_event_sink
+                                    .publish(SessionEvent::SessionRemoved { thread_id: tid })
+                                    .await;
                             }
                         }
                     }
                 }
             }
-            crate::relay::WebSocketCommand::PermissionResponse { request_id, decision } => {
+            crate::relay::WebSocketCommand::PermissionResponse {
+                request_id,
+                decision,
+            } => {
                 if let Some((_, tx)) = self.pending_permissions.remove(&request_id) {
                     let _ = tx.send(agent_client_protocol::PermissionOptionId::new(decision));
                 }
             }
-            crate::relay::WebSocketCommand::BindTelegramThread { session_id, thread_id, name } => {
-                let sid = session_id.clone().ok_or_else(|| anyhow::anyhow!("session_id required"))?;
-                
+            crate::relay::WebSocketCommand::BindTelegramThread {
+                session_id,
+                thread_id,
+                name,
+            } => {
+                let sid = session_id
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("session_id required"))?;
+
                 // Validation rules (daemon-side)
                 if thread_id.is_none() || thread_id.unwrap() <= 0 {
                     if let Some(n) = &name {
                         let trimmed = n.trim();
                         if trimmed.is_empty() {
-                            self.session_event_sink.publish(SessionEvent::Error {
-                                in_reply_to: Some("bind_telegram_thread".to_string()),
-                                session_id: session_id.clone(),
-                                code: "name_required".to_string(),
-                                message: "name field required when thread_id is null".to_string(),
-                            }).await;
+                            self.session_event_sink
+                                .publish(SessionEvent::Error {
+                                    in_reply_to: Some("bind_telegram_thread".to_string()),
+                                    session_id: session_id.clone(),
+                                    code: "name_required".to_string(),
+                                    message: "name field required when thread_id is null"
+                                        .to_string(),
+                                })
+                                .await;
                             return Ok(());
                         }
                         if trimmed.len() > 128 {
-                            self.session_event_sink.publish(SessionEvent::Error {
-                                in_reply_to: Some("bind_telegram_thread".to_string()),
-                                session_id: session_id.clone(),
-                                code: "invalid_argument".to_string(),
-                                message: "name too long (max 128 chars)".to_string(),
-                            }).await;
+                            self.session_event_sink
+                                .publish(SessionEvent::Error {
+                                    in_reply_to: Some("bind_telegram_thread".to_string()),
+                                    session_id: session_id.clone(),
+                                    code: "invalid_argument".to_string(),
+                                    message: "name too long (max 128 chars)".to_string(),
+                                })
+                                .await;
                             return Ok(());
                         }
                         if trimmed.chars().any(|c| c.is_control()) {
-                            self.session_event_sink.publish(SessionEvent::Error {
-                                in_reply_to: Some("bind_telegram_thread".to_string()),
-                                session_id: session_id.clone(),
-                                code: "invalid_argument".to_string(),
-                                message: "name contains control characters".to_string(),
-                            }).await;
+                            self.session_event_sink
+                                .publish(SessionEvent::Error {
+                                    in_reply_to: Some("bind_telegram_thread".to_string()),
+                                    session_id: session_id.clone(),
+                                    code: "invalid_argument".to_string(),
+                                    message: "name contains control characters".to_string(),
+                                })
+                                .await;
                             return Ok(());
                         }
                     } else {
@@ -323,14 +421,16 @@ impl crate::relay::WebSocketCommandHandler for DaemonHandle {
                             let folder_name = {
                                 let topics = self.session_manager.topics.get(&okey).unwrap();
                                 let active = topics.active.as_ref().unwrap();
-                                active.project_path
+                                active
+                                    .project_path
                                     .file_name()
                                     .map(|n| n.to_string_lossy().to_string())
                                     .unwrap_or_else(|| "project".to_string())
                             };
                             format!("{}: {}", folder_name, Self::generate_two_words())
                         };
-                        let topic = self.bot
+                        let topic = self
+                            .bot
                             .create_forum_topic(ChatId(self.config.chat_id), &topic_name)
                             .icon_color(teloxide::types::Rgb::from_u32(0x6FB9F0))
                             .await?;
@@ -340,33 +440,47 @@ impl crate::relay::WebSocketCommandHandler for DaemonHandle {
 
                 if let Some((_, mut topic_entry)) = self.session_manager.topics.remove(&okey) {
                     if let Some(active) = topic_entry.active.take() {
-                        active.telegram_thread_id.store(resolved_tid, std::sync::atomic::Ordering::Relaxed);
+                        active
+                            .telegram_thread_id
+                            .store(resolved_tid, std::sync::atomic::Ordering::Relaxed);
                         *active.name.lock().await = Some(resolved_name.clone());
-                        
-                        let mut new_topic = self.session_manager.topics.entry(resolved_tid).or_insert_with(|| TopicEntry {
-                            name: Some(resolved_name.clone()),
-                            active: None,
-                            history: Vec::new(),
-                        });
+
+                        let mut new_topic = self
+                            .session_manager
+                            .topics
+                            .entry(resolved_tid)
+                            .or_insert_with(|| TopicEntry {
+                                name: Some(resolved_name.clone()),
+                                active: None,
+                                history: Vec::new(),
+                            });
                         new_topic.name = Some(resolved_name.clone());
                         new_topic.active = Some(active);
                         drop(new_topic);
 
                         // Emit event
-                        self.session_event_sink.publish(SessionEvent::TelegramThreadBound {
-                            session_id: sid,
-                            thread_id: resolved_tid,
-                            name: resolved_name,
-                            created,
-                        }).await;
+                        self.session_event_sink
+                            .publish(SessionEvent::TelegramThreadBound {
+                                session_id: sid,
+                                thread_id: resolved_tid,
+                                name: resolved_name,
+                                created,
+                            })
+                            .await;
                     }
                 }
             }
-            crate::relay::WebSocketCommand::RenameSession { thread_id, session_id, name } => {
-                let tid = self.session_manager.resolve_thread_id(thread_id, session_id.clone());
+            crate::relay::WebSocketCommand::RenameSession {
+                thread_id,
+                session_id,
+                name,
+            } => {
+                let tid = self
+                    .session_manager
+                    .resolve_thread_id(thread_id, session_id.clone());
                 let mut sid = session_id;
                 let mut event_sink = self.session_event_sink.clone();
-                
+
                 if let Some(tid) = tid {
                     if let Some(mut topic) = self.session_manager.topics.get_mut(&tid) {
                         topic.name = Some(name.clone());
@@ -378,29 +492,37 @@ impl crate::relay::WebSocketCommandHandler for DaemonHandle {
                             event_sink = active.event_sink.clone();
                         }
                     }
-                    
+
                     let resolved_sid = sid.unwrap_or_default();
-                    
-                    event_sink.publish(SessionEvent::SessionRenamed {
-                        thread_id: tid,
-                        acp_session_id: resolved_sid,
-                        name: name.clone(),
-                    }).await;
-                    
+
+                    event_sink
+                        .publish(SessionEvent::SessionRenamed {
+                            thread_id: tid,
+                            acp_session_id: resolved_sid,
+                            name: name.clone(),
+                        })
+                        .await;
+
                     self.session_manager.persist_topics().await;
-                    
+
                     // Rename telegram topic if it exists
                     if tid > 0 {
-                        let _ = self.bot.edit_forum_topic(
-                            ChatId(self.config.chat_id),
-                            teloxide::types::ThreadId(teloxide::types::MessageId(tid)),
-                        ).name(&name).await;
+                        let _ = self
+                            .bot
+                            .edit_forum_topic(
+                                ChatId(self.config.chat_id),
+                                teloxide::types::ThreadId(teloxide::types::MessageId(tid)),
+                            )
+                            .name(&name)
+                            .await;
                     }
                 }
             }
             crate::relay::WebSocketCommand::RemoveTopic { thread_id } => {
                 if self.remove_topic(thread_id).await.is_some() {
-                    self.session_event_sink.publish(SessionEvent::TopicRemoved { thread_id }).await;
+                    self.session_event_sink
+                        .publish(SessionEvent::TopicRemoved { thread_id })
+                        .await;
                 }
             }
             crate::relay::WebSocketCommand::ExecuteCommand {
@@ -409,7 +531,8 @@ impl crate::relay::WebSocketCommandHandler for DaemonHandle {
                 command_id,
                 arguments,
             } => {
-                let tx = self.session_manager
+                let tx = self
+                    .session_manager
                     .resolve_session_tx(thread_id, session_id)
                     .ok_or_else(|| anyhow::anyhow!("No active session found"))?;
                 let (result_tx, result_rx) = tokio::sync::oneshot::channel();
@@ -420,6 +543,64 @@ impl crate::relay::WebSocketCommandHandler for DaemonHandle {
                 })
                 .map_err(|_| anyhow::anyhow!("Failed to send command to session"))?;
                 result_rx.await??;
+            }
+            crate::relay::WebSocketCommand::CreateTerminal {
+                thread_id,
+                session_id,
+                cols,
+                rows,
+                cwd,
+                command,
+            } => {
+                let (resolved_thread_id, resolved_session_id, project_path) =
+                    self.resolve_terminal_context(thread_id, session_id);
+                let cwd = self.resolve_terminal_cwd(cwd, project_path)?;
+                let info = self
+                    .terminal_manager
+                    .create_terminal(TerminalSpec {
+                        thread_id: resolved_thread_id,
+                        session_id: resolved_session_id,
+                        cwd,
+                        command,
+                        cols,
+                        rows,
+                    })
+                    .await?;
+                self.terminal_manager
+                    .publish_snapshot(&info.terminal_id)
+                    .await?;
+            }
+            crate::relay::WebSocketCommand::AttachTerminal {
+                terminal_id,
+                cols,
+                rows,
+            } => {
+                self.terminal_manager
+                    .attach_terminal(&terminal_id, cols, rows)
+                    .await?;
+            }
+            crate::relay::WebSocketCommand::TerminalInput { terminal_id, data } => {
+                self.terminal_manager
+                    .write_input(&terminal_id, &data)
+                    .await?;
+            }
+            crate::relay::WebSocketCommand::TerminalResize {
+                terminal_id,
+                cols,
+                rows,
+            } => {
+                self.terminal_manager
+                    .resize_terminal(&terminal_id, cols, rows)
+                    .await?;
+            }
+            crate::relay::WebSocketCommand::CloseTerminal { terminal_id } => {
+                self.terminal_manager.close_terminal(&terminal_id).await?;
+            }
+            crate::relay::WebSocketCommand::ListTerminals => {
+                let snapshot = self.get_snapshot().await;
+                for event in snapshot {
+                    self.session_event_sink.publish(event).await;
+                }
             }
             crate::relay::WebSocketCommand::ListSessions => {
                 use crate::relay::SessionStateProvider;
@@ -452,7 +633,8 @@ impl DaemonHandle {
         payload: &str,
     ) -> Result<Option<String>> {
         tracing::debug!(session_id, "handle_mcp_message: looking up session");
-        let mcp_session = self.session_manager
+        let mcp_session = self
+            .session_manager
             .get_mcp_session_by_id(session_id)
             .ok_or_else(|| anyhow::anyhow!("Unknown MCP session id: {}", session_id))?;
 
@@ -491,7 +673,8 @@ impl DaemonHandle {
 
     pub async fn cancel_session(&self, thread_id: i32) -> Result<()> {
         let cancel_tx = {
-            let entry = self.session_manager
+            let entry = self
+                .session_manager
                 .topics
                 .get(&thread_id)
                 .ok_or_else(|| anyhow::anyhow!("No topic for this thread"))?;
@@ -514,7 +697,9 @@ impl DaemonHandle {
     pub async fn remove_topic(&self, thread_id: i32) -> Option<TopicEntry> {
         let entry = self.session_manager.remove_topic(thread_id).await?;
         self.session_manager.persist_topics().await;
-        self.session_event_sink.publish(SessionEvent::SessionRemoved { thread_id }).await;
+        self.session_event_sink
+            .publish(SessionEvent::SessionRemoved { thread_id })
+            .await;
         Some(entry)
     }
 
@@ -613,7 +798,10 @@ impl DaemonHandle {
         };
 
         if let Some(text) = _prompt {
-            if let Some(tx) = self.session_manager.get_session_command_tx_by_thread(thread_id) {
+            if let Some(tx) = self
+                .session_manager
+                .get_session_command_tx_by_thread(thread_id)
+            {
                 let _ = tx.send(SessionCommand::Prompt(vec![
                     agent_client_protocol::ContentBlock::Text(
                         agent_client_protocol::TextContent::new(text),
@@ -767,7 +955,7 @@ impl DaemonHandle {
         let available_commands = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let (history_sink, history) =
             crate::relay::HistorySessionEventSink::new(self.config.websocket_history_limit);
-        
+
         // Seed initial history
         {
             let mut h = history.lock().await;
@@ -804,7 +992,8 @@ impl DaemonHandle {
             .await?,
         );
         let mcp_session_id = mcp_session.id.clone();
-        let mcp_servers = crate::mcp::build_mcp_servers(&mcp_session_id, &self.config.socket_path, &self.config)?;
+        let mcp_servers =
+            crate::mcp::build_mcp_servers(&mcp_session_id, &self.config.socket_path, &self.config)?;
 
         // Spawn the event consumer within LocalSet.
         let bot = self.bot.clone();
@@ -826,34 +1015,38 @@ impl DaemonHandle {
             let bot_clone = bot.clone();
             let chat_id_clone = chat_id;
             let thread_id_ref_clone = thread_id_ref.clone();
-            tokio::task::spawn_local(with_session_context(
-                session_context.clone(),
-                async move {
-                    let mut rx = event_rx;
-                    let mut ctx = None;
-                    let mut consumer = crate::handlers::SessionEventConsumer::new();
+            tokio::task::spawn_local(with_session_context(session_context.clone(), async move {
+                let mut rx = event_rx;
+                let mut ctx = None;
+                let mut consumer = crate::handlers::SessionEventConsumer::new();
 
-                    while let Some(event) = rx.recv().await {
-                        if let AgentEvent::Update(update) = &event {
-                            if let agent_client_protocol::SessionUpdate::AvailableCommandsUpdate(u) = update.as_ref() {
-                                *available_commands_clone.lock().await = u.available_commands.clone();
-                            }
-                        }
-
-                        let current_tid = thread_id_ref_clone.load(std::sync::atomic::Ordering::Relaxed);
-                        if current_tid > 0 {
-                            if ctx.is_none() {
-                                ctx = Some(crate::handlers::EventContext::for_telegram(bot_clone.clone(), chat_id_clone, current_tid));
-                            }
-                            let c = ctx.as_mut().unwrap();
-                            consumer.handle_event(&event, c).await;
+                while let Some(event) = rx.recv().await {
+                    if let AgentEvent::Update(update) = &event {
+                        if let agent_client_protocol::SessionUpdate::AvailableCommandsUpdate(u) =
+                            update.as_ref()
+                        {
+                            *available_commands_clone.lock().await = u.available_commands.clone();
                         }
                     }
-                    if let Some(c) = ctx.as_mut() {
-                        consumer.finish(c).await;
+
+                    let current_tid =
+                        thread_id_ref_clone.load(std::sync::atomic::Ordering::Relaxed);
+                    if current_tid > 0 {
+                        if ctx.is_none() {
+                            ctx = Some(crate::handlers::EventContext::for_telegram(
+                                bot_clone.clone(),
+                                chat_id_clone,
+                                current_tid,
+                            ));
+                        }
+                        let c = ctx.as_mut().unwrap();
+                        consumer.handle_event(&event, c).await;
                     }
-                },
-            ));
+                }
+                if let Some(c) = ctx.as_mut() {
+                    consumer.finish(c).await;
+                }
+            }));
         }
 
         // Dispatch to handlers
@@ -870,13 +1063,17 @@ impl DaemonHandle {
             },
         ));
         // Get or create TopicEntry, set active
-        let mut topic = self.session_manager.topics.entry(thread_id).or_insert_with(|| TopicEntry {
-            name: None,
-            active: None,
-            history: Vec::new(),
-        });
+        let mut topic = self
+            .session_manager
+            .topics
+            .entry(thread_id)
+            .or_insert_with(|| TopicEntry {
+                name: None,
+                active: None,
+                history: Vec::new(),
+            });
         let topic_name = topic.name.clone();
-        
+
         let session_entry = SessionEntry {
             acp_session_id: None, // filled in after init completes
             mcp_session_id: mcp_session_id.clone(),
@@ -959,11 +1156,15 @@ impl DaemonHandle {
         };
 
         // Get or create TopicEntry, set active, append to history
-        let mut topic = self.session_manager.topics.entry(thread_id).or_insert_with(|| TopicEntry {
-            name: None,
-            active: None,
-            history: Vec::new(),
-        });
+        let mut topic = self
+            .session_manager
+            .topics
+            .entry(thread_id)
+            .or_insert_with(|| TopicEntry {
+                name: None,
+                active: None,
+                history: Vec::new(),
+            });
         // Check if this session already exists in history (resume case)
         let existing = topic
             .history
@@ -1204,7 +1405,9 @@ async fn init_agent(
             if let Err(e) = handle_io.await {
                 sess_error!("ACP IO error: {e}");
                 let message = format!("Agent connection error: {e}");
-                let _ = io_event_tx.send(AgentEvent::Error { content: message.clone() });
+                let _ = io_event_tx.send(AgentEvent::Error {
+                    content: message.clone(),
+                });
                 if let Some(acp_session_id) = session_id_rx.borrow().clone() {
                     io_event_sink
                         .publish(SessionEvent::AgentUpdate {
@@ -1221,7 +1424,9 @@ async fn init_agent(
             if let Err(e) = handle_io.await {
                 tracing::error!("ACP IO error: {e}");
                 let message = format!("Agent connection error: {e}");
-                let _ = io_event_tx.send(AgentEvent::Error { content: message.clone() });
+                let _ = io_event_tx.send(AgentEvent::Error {
+                    content: message.clone(),
+                });
                 if let Some(acp_session_id) = session_id_rx.borrow().clone() {
                     io_event_sink
                         .publish(SessionEvent::AgentUpdate {
@@ -1438,6 +1643,12 @@ pub async fn run_daemon(config: Config) -> Result<()> {
         start_time: std::sync::atomic::AtomicI64::new(chrono::Utc::now().timestamp()),
         local_start_tx,
         session_manager: SessionManager::new(),
+        terminal_manager: Arc::new(TerminalManager::new(
+            websocket_events
+                .as_ref()
+                .map(|sink| sink.clone() as Arc<dyn SessionEventSink>)
+                .unwrap_or_else(|| Arc::new(NoopSessionEventSink)),
+        )),
         pending_permissions: Arc::new(DashMap::new()),
         mdns: std::sync::Mutex::new(None),
     });
@@ -1450,7 +1661,10 @@ pub async fn run_daemon(config: Config) -> Result<()> {
             tracing::info!(bind_addr = %bind_addr, port = addr.port(), "Attempting to start mDNS advertising");
             match crate::websocket::advertise_service(addr.port()) {
                 Ok(mdns_daemon) => {
-                    tracing::info!(port = addr.port(), "Websocket mDNS advertising successfully registered in daemon");
+                    tracing::info!(
+                        port = addr.port(),
+                        "Websocket mDNS advertising successfully registered in daemon"
+                    );
                     *daemon.mdns.lock().unwrap() = Some(mdns_daemon);
                 }
                 Err(err) => {
@@ -1555,12 +1769,17 @@ pub async fn run_daemon(config: Config) -> Result<()> {
                                 let history = active.history.lock().await.iter().cloned().collect();
                                 if let Some(acp_session_id) = active.acp_session_id.clone() {
                                     let name = active.name.lock().await.clone();
-                                    let available_commands = active.available_commands.lock().await.clone();
+                                    let available_commands =
+                                        active.available_commands.lock().await.clone();
                                     sessions.push(crate::types::SessionInfo {
                                         acp_session_id,
                                         project_path: active.project_path.clone(),
                                         status,
-                                        thread_id: if thread_id > 0 { Some(thread_id) } else { None },
+                                        thread_id: if thread_id > 0 {
+                                            Some(thread_id)
+                                        } else {
+                                            None
+                                        },
                                         name,
                                         agent_command: active.agent_command.clone(),
                                         agent_name: active.agent_name.clone(),
@@ -1629,8 +1848,11 @@ pub async fn run_daemon(config: Config) -> Result<()> {
     }
 
     // Run Telegram bot (blocks)
-    daemon.start_time.store(chrono::Utc::now().timestamp(), std::sync::atomic::Ordering::Relaxed);
-    
+    daemon.start_time.store(
+        chrono::Utc::now().timestamp(),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+
     let d = daemon.clone();
     tokio::select! {
         _ = telegram::run_bot(bot, daemon) => {

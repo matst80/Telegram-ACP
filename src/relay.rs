@@ -14,6 +14,23 @@ pub struct ProjectInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TerminalInfo {
+    pub terminal_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    pub cwd: std::path::PathBuf,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub command: Vec<String>,
+    pub cols: u16,
+    pub rows: u16,
+    pub running: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionEvent {
     UserPrompt {
@@ -72,10 +89,53 @@ pub enum SessionEvent {
     TopicRemoved {
         thread_id: i32,
     },
+    TerminalCreated {
+        terminal: TerminalInfo,
+    },
+    TerminalAttached {
+        terminal_id: String,
+        cols: u16,
+        rows: u16,
+    },
+    TerminalOutput {
+        terminal_id: String,
+        sequence: u64,
+        data: String,
+    },
+    TerminalSnapshot {
+        terminal_id: String,
+        sequence: u64,
+        cols: u16,
+        rows: u16,
+        cursor_row: u16,
+        cursor_col: u16,
+        data: String,
+        running: bool,
+    },
+    TerminalResized {
+        terminal_id: String,
+        cols: u16,
+        rows: u16,
+    },
+    TerminalExited {
+        terminal_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i32>,
+    },
+    TerminalClosed {
+        terminal_id: String,
+    },
+    TerminalError {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        terminal_id: Option<String>,
+        message: String,
+    },
     Snapshot {
         sessions: Vec<crate::types::SessionInfo>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         projects: Vec<ProjectInfo>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        terminals: Vec<TerminalInfo>,
     },
 }
 
@@ -166,6 +226,36 @@ pub enum WebSocketCommand {
         #[serde(default)]
         arguments: serde_json::Value,
     },
+    CreateTerminal {
+        #[serde(default)]
+        thread_id: Option<i32>,
+        #[serde(default)]
+        session_id: Option<String>,
+        cols: u16,
+        rows: u16,
+        #[serde(default)]
+        cwd: Option<String>,
+        #[serde(default)]
+        command: Option<Vec<String>>,
+    },
+    AttachTerminal {
+        terminal_id: String,
+        cols: u16,
+        rows: u16,
+    },
+    TerminalInput {
+        terminal_id: String,
+        data: String,
+    },
+    TerminalResize {
+        terminal_id: String,
+        cols: u16,
+        rows: u16,
+    },
+    CloseTerminal {
+        terminal_id: String,
+    },
+    ListTerminals,
     ListSessions,
 }
 
@@ -379,5 +469,68 @@ mod tests {
         } else {
             panic!("wrong command variant");
         }
+    }
+
+    #[test]
+    fn create_terminal_deserialization() {
+        let json = r#"{
+            "type": "create_terminal",
+            "thread_id": 7,
+            "cols": 120,
+            "rows": 40,
+            "cwd": "subdir",
+            "command": ["bash", "-lc", "printf hi"]
+        }"#;
+
+        let cmd: WebSocketCommand = serde_json::from_str(json).unwrap();
+        match cmd {
+            WebSocketCommand::CreateTerminal {
+                thread_id,
+                session_id,
+                cols,
+                rows,
+                cwd,
+                command,
+            } => {
+                assert_eq!(thread_id, Some(7));
+                assert_eq!(session_id, None);
+                assert_eq!(cols, 120);
+                assert_eq!(rows, 40);
+                assert_eq!(cwd.as_deref(), Some("subdir"));
+                assert_eq!(
+                    command,
+                    Some(vec![
+                        "bash".to_string(),
+                        "-lc".to_string(),
+                        "printf hi".to_string()
+                    ])
+                );
+            }
+            _ => panic!("wrong command variant"),
+        }
+    }
+
+    #[test]
+    fn snapshot_serializes_terminals() {
+        let event = SessionEvent::Snapshot {
+            sessions: Vec::new(),
+            projects: Vec::new(),
+            terminals: vec![TerminalInfo {
+                terminal_id: "term-1".to_string(),
+                thread_id: Some(11),
+                session_id: Some("session-1".to_string()),
+                cwd: std::path::PathBuf::from("/tmp/project"),
+                command: vec!["bash".to_string()],
+                cols: 80,
+                rows: 24,
+                running: true,
+                exit_code: None,
+            }],
+        };
+
+        let json = serde_json::to_value(event).unwrap();
+        assert_eq!(json["type"], "snapshot");
+        assert_eq!(json["terminals"][0]["terminal_id"], "term-1");
+        assert_eq!(json["terminals"][0]["cols"], 80);
     }
 }
