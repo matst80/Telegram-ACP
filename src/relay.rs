@@ -180,6 +180,7 @@ pub enum WebSocketCommand {
         session_id: Option<String>,
         mode_id: String,
     },
+    #[serde(alias = "spawn")]
     SpawnSession {
         project_path: String,
         #[serde(default, alias = "agent")]

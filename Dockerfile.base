@@ -1,0 +1,117 @@
+# Base image for graph-cms development
+ARG OS_IMAGE=mcr.microsoft.com/devcontainers/go:1.25-trixie
+FROM ${OS_IMAGE}
+
+# Prevent interactive prompts during package installation
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install system dependencies (include Xfce desktop for VNC sessions)
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    curl \
+    git \
+    fzf tmux ripgrep fd-find bat \
+    rsync \
+    jq \
+    # Networking & System Info
+    iputils-ping dnsutils net-tools iproute2 procps btop \
+    # Text Editing & Viewing
+    vim less tree \
+    tmux \
+    zsh \
+    openssh-client \
+    chromium \
+    unzip \
+    nodejs \
+    npm \
+    xvfb \
+    x11vnc \
+    novnc \
+    websockify \
+    xterm \
+    xfce4 \
+    xfce4-goodies \
+    xfce4-terminal \
+    xfce4-clipman \
+    dbus-x11 \
+    xinit \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install kubectl
+RUN curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/$(dpkg --print-architecture)/kubectl" \
+    && chmod +x kubectl \
+    && mv kubectl /usr/local/bin/
+
+# Install GitHub CLI
+RUN type -p curl >/dev/null || (apt-get update && apt-get install curl -y) \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+    && apt-get update \
+    && apt-get install gh -y
+
+# Install Docker CLI
+RUN install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
+    && chmod a+r /etc/apt/keyrings/docker.asc \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+    | tee /etc/apt/sources.list.d/docker.list > /dev/null \
+    && apt-get update && apt-get install -y docker-ce-cli
+
+# Install Delve (Go debugger)
+RUN go install github.com/go-delve/delve/cmd/dlv@latest
+
+# Install Jules and Gemini CLIs
+RUN npm install -g @google/jules @google/gemini-cli --unsafe-perm
+
+# Install Opencode
+RUN curl -fsSL https://opencode.ai/install | bash
+
+RUN curl -fsSL https://gh.io/copilot-install | bash
+
+RUN curl -fsSL https://claude.ai/install.sh | bash
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# Setup directories
+#RUN mkdir -p /data/db /data/static-site /data/templates /data/schemas /root/.ssh && chmod 700 /root/.ssh
+
+# Add VNC startup script
+COPY vnc-startup.sh /usr/local/bin/vnc-startup.sh
+RUN chmod +x /usr/local/bin/vnc-startup.sh
+#RUN rm -rf /root/.oh-my-zsh
+#RUN sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"
+
+# Install VS Code CLI (includes `code tunnel`) and put it on PATH
+RUN curl -Lk 'https://code.visualstudio.com/sha/download?build=stable&os=cli-alpine-x64' --output vscode_cli.tar.gz
+RUN tar -xf vscode_cli.tar.gz
+
+EXPOSE 6080
+
+# Add a wrapper to allow running Chromium as root by default (appends --no-sandbox)
+RUN cat > /usr/local/bin/chromium-wrapper <<'EOF' && \
+chmod +x /usr/local/bin/chromium-wrapper && \
+ln -sf /usr/local/bin/chromium-wrapper /usr/local/bin/chromium && \
+ln -sf /usr/local/bin/chromium-wrapper /usr/local/bin/chromium-browser
+#!/bin/sh
+REAL=""
+for p in /usr/bin/chromium /usr/bin/chromium-browser /usr/bin/chromium-stable; do
+    if [ -x "$p" ]; then
+        REAL="$p"
+        break
+    fi
+done
+if [ -z "$REAL" ]; then
+    exec chromium --no-sandbox "$@"
+else
+    exec "$REAL" --no-sandbox "$@"
+fi
+EOF
+
+# Set up custom Chromium desktop entry with --no-sandbox as default browser
+RUN mkdir -p /root/.local/share/applications/ && \
+    cp /usr/share/applications/chromium.desktop /root/.local/share/applications/chromium-nosandbox.desktop && \
+    sed -i 's|Exec=/usr/bin/chromium|Exec=/usr/bin/chromium --no-sandbox|' /root/.local/share/applications/chromium-nosandbox.desktop && \
+    sed -i 's|Name=Chromium|Name=Chromium (No Sandbox)|' /root/.local/share/applications/chromium-nosandbox.desktop && \
+    update-desktop-database /root/.local/share/applications/ && \
+    xdg-settings set default-web-browser chromium-nosandbox.desktop

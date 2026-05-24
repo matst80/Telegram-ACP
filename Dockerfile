@@ -1,4 +1,4 @@
-FROM rust:1.87-bookworm AS builder
+FROM rust:1.95-bookworm AS builder
 
 WORKDIR /app
 
@@ -17,7 +17,7 @@ COPY README.md WEBSOCKET.md LICENSE ./
 RUN cargo build --release --bin telegram-acp
 
 
-FROM matst80/graph-cms-base:latest
+FROM matst80/code-base:latest
 
 ENV HOME=/root \
     TELEGRAM_ACP_CONFIG_DIR=/root/.config/telegram-acp \
@@ -36,4 +36,4 @@ RUN mkdir -p /root/.config/telegram-acp /workspace \
 
 EXPOSE 9001 5900
 
-CMD ["/usr/local/bin/telegram-acp-entrypoint", "telegram-acp", "daemon"]
+CMD ["/usr/local/bin/telegram-acp-entrypoint", "telegram-acp", "daemon","--rag-register-url","https://rag.k6n.net/api/acp/register"]
