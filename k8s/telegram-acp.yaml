@@ -10,9 +10,9 @@ metadata:
   namespace: dev
 type: Opaque
 stringData:
-  bot-token: "8756024036:AAHoyLPVsTWf6SLHMibUaWQ0z6PKLqPrDtA"
+  bot-token: ""
   chat-id: "366436544"
-  rag-token: "rag_mcp_rqG7xhAR19mj5iddaUM8I2XxoLp3s6mA-GcEVpaMg34"
+  rag-token: ""
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
