@@ -165,7 +165,9 @@ Broadcast when a session begins, is resumed, terminates, or is removed.
 {
   "type": "session_started | session_switched | session_ended | session_removed",
   "thread_id": "number",
-  "acp_session_id": "string | null"
+  "acp_session_id": "string | null",
+  "folder": "string (for session_started/session_switched)",
+  "name": "string | null (for session_started/session_switched)"
 }
 ```
 

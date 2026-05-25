@@ -48,10 +48,16 @@ pub enum SessionEvent {
     SessionStarted {
         thread_id: Option<i32>,
         acp_session_id: String,
+        folder: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
     },
     SessionSwitched {
         thread_id: Option<i32>,
         acp_session_id: String,
+        folder: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
     },
     SessionEnded {
         thread_id: Option<i32>,
@@ -405,6 +411,8 @@ mod tests {
         let test_event = SessionEvent::SessionStarted {
             thread_id: Some(42),
             acp_session_id: "test-session-id".to_string(),
+            folder: "project".to_string(),
+            name: Some("project: swift river".to_string()),
         };
 
         composite.publish(test_event).await;

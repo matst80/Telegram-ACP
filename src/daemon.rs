@@ -52,6 +52,14 @@ pub struct DaemonHandle {
 }
 
 impl DaemonHandle {
+    fn session_folder_name(project_path: &std::path::Path) -> String {
+        project_path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| project_path.display().to_string())
+    }
+
     pub fn list_projects(&self) -> Vec<crate::relay::ProjectInfo> {
         let mut projects = Vec::new();
         if let Some(root) = &self.config.project_root {
@@ -1073,6 +1081,8 @@ impl DaemonHandle {
                 history: Vec::new(),
             });
         let topic_name = topic.name.clone();
+        let event_name = topic_name.clone();
+        let event_folder = Self::session_folder_name(&project_path);
 
         let session_entry = SessionEntry {
             acp_session_id: None, // filled in after init completes
@@ -1183,16 +1193,22 @@ impl DaemonHandle {
         // Persist after successful init
         self.session_manager.persist_topics().await;
 
+        let folder = event_folder;
+        let name = event_name;
         session_event_sink
             .publish(if resumed_session && initiated_via_switch {
                 SessionEvent::SessionSwitched {
                     thread_id: if thread_id > 0 { Some(thread_id) } else { None },
                     acp_session_id: acp_session_id.clone(),
+                    folder,
+                    name,
                 }
             } else {
                 SessionEvent::SessionStarted {
                     thread_id: if thread_id > 0 { Some(thread_id) } else { None },
                     acp_session_id: acp_session_id.clone(),
+                    folder,
+                    name,
                 }
             })
             .await;

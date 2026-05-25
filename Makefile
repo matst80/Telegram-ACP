@@ -1,7 +1,7 @@
 # Variables
 RAG_TOKEN ?= rag_mcp_rqG7xhAR19mj5iddaUM8I2XxoLp3s6mA-GcEVpaMg34
 RAG_URL ?= https://rag.k6n.net/api/acp/register
-RAG_NAME ?= acp-game
+RAG_NAME ?= acp-maxi
 RAG_HOST ?= 10.10.10.205
 TELEGRAM_ACP_WEBSOCKET_BIND ?= 0.0.0.0:9001
 PORT ?= 9001
