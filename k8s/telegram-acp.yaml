@@ -1,0 +1,166 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dev
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: telegram-acp-secret
+  namespace: dev
+type: Opaque
+stringData:
+  bot-token: ""
+  chat-id: "366436544"
+  rag-token: ""
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: telegram-acp-root-pvc
+  namespace: dev
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: srv-seber
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: telegram-acp-workspace-pvc
+  namespace: dev
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: srv-seber
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: telegram-acp-service
+  namespace: dev
+spec:
+  type: LoadBalancer
+  selector:
+    app: telegram-acp
+  ports:
+    - name: websocket
+      port: 9001
+      targetPort: 9001
+      protocol: TCP
+    - name: novnc
+      port: 6080
+      targetPort: 6080
+      protocol: TCP
+    - name: vnc
+      port: 5900
+      targetPort: 5900
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: telegram-acp
+  namespace: dev
+  labels:
+    app: telegram-acp
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: telegram-acp
+  template:
+    metadata:
+      labels:
+        app: telegram-acp
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: serber
+      initContainers:
+        - name: init-root
+          image: registry.k6n.net/matst80/code-acp:latest
+          imagePullPolicy: Always
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Syncing /root directory to persistent volume..."
+              rsync -au --exclude='.ssh' --exclude='.config/telegram-acp/config.toml' --exclude='.gitconfig' /root/ /mnt/root/
+          volumeMounts:
+            - name: root-volume
+              mountPath: /mnt/root
+      containers:
+        - name: telegram-acp
+          image: registry.k6n.net/matst80/code-acp:latest
+          imagePullPolicy: Always
+          command:
+            - /bin/sh
+            - -c
+            - |
+              if [ -x /usr/local/bin/vnc-startup.sh ]; then
+                echo "Starting VNC server in background..."
+                /usr/local/bin/vnc-startup.sh &
+              fi
+              echo "Starting telegram-acp daemon..."
+              exec /usr/local/bin/telegram-acp-entrypoint telegram-acp daemon
+          env:
+            - name: TELEGRAM_ACP_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: telegram-acp-secret
+                  key: bot-token
+            - name: TELEGRAM_ACP_CHAT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: telegram-acp-secret
+                  key: chat-id
+            - name: TELEGRAM_ACP_RAG_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: telegram-acp-secret
+                  key: rag-token
+            - name: TELEGRAM_ACP_RAG_REGISTER_URL
+              value: "http://rag-service-cuda.home.svc.cluster.local:4001/api/acp/register"
+            - name: TELEGRAM_ACP_RAG_REGISTER_NAME
+              value: "acp-k8s"
+            - name: TELEGRAM_ACP_DEFAULT_AGENT
+              value: "gemini"
+            - name: TELEGRAM_ACP_DEFAULT_AGENT_CMD
+              value: "gemini --acp"
+            - name: TELEGRAM_ACP_WEBSOCKET_BIND
+              value: "0.0.0.0:9001"
+            - name: TELEGRAM_ACP_PROJECT_ROOT
+              value: "/workspace"
+          ports:
+            - containerPort: 9001
+              name: websocket
+            - containerPort: 6080
+              name: novnc
+            - containerPort: 5900
+              name: vnc
+          volumeMounts:
+            - name: root-volume
+              mountPath: /root
+            - name: workspace-volume
+              mountPath: /workspace
+            - name: docker-socket
+              mountPath: /var/run/docker.sock
+      volumes:
+        - name: root-volume
+          persistentVolumeClaim:
+            claimName: telegram-acp-root-pvc
+        - name: workspace-volume
+          persistentVolumeClaim:
+            claimName: telegram-acp-workspace-pvc
+        - name: docker-socket
+          hostPath:
+            path: /var/run/docker.sock
+            type: Socket

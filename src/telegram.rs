@@ -59,6 +59,33 @@ async fn handle_message(bot: Bot, msg: Message, daemon: Arc<DaemonHandle>) -> an
     if commands::execute_slash_command(&bot, &msg, &daemon).await? {
         return Ok(());
     }
+    
+    if let Some(edited) = msg.forum_topic_edited() {
+        if let Some(thread_id) = msg.thread_id {
+            if let Some(new_name) = &edited.name {
+                let tid = thread_id.0.0;
+                tracing::info!("Forum topic {tid} renamed to: {new_name}");
+                
+                let mut session_id = None;
+                if let Some(mut topic) = daemon.session_manager.topics.get_mut(&tid) {
+                    topic.name = Some(new_name.clone());
+                    if let Some(active) = &topic.active {
+                        *active.name.lock().await = Some(new_name.clone());
+                        session_id = active.acp_session_id.clone();
+                    }
+                }
+                
+                // Emit SessionRenamed event
+                daemon.session_event_sink.publish(SessionEvent::SessionRenamed {
+                    thread_id: tid,
+                    acp_session_id: session_id.unwrap_or_default(),
+                    name: new_name.clone(),
+                }).await;
+                
+                daemon.session_manager.persist_topics().await;
+            }
+        }
+    }
 
     if let Some(thread_id) = msg.thread_id {
         if msg.from.as_ref().map(|user| user.is_bot).unwrap_or(false) {
@@ -125,15 +152,17 @@ async fn handle_topic_message(
 
     let text = crate::session::extract_text_from_content(&content);
 
-    daemon
-        .session_event_sink
-        .publish(SessionEvent::UserPrompt {
-            thread_id: Some(thread),
-            acp_session_id: daemon.session_manager.get_acp_session_id_by_thread(thread),
-            text,
-            content: content.clone(),
-        })
-        .await;
+    let Some(sink) = daemon.session_manager.get_session_event_sink_by_thread(thread) else {
+        return Ok(());
+    };
+
+    sink.publish(SessionEvent::UserPrompt {
+        thread_id: Some(thread),
+        acp_session_id: daemon.session_manager.get_acp_session_id_by_thread(thread),
+        text,
+        content: content.clone(),
+    })
+    .await;
 
     command_tx
         .send(SessionCommand::Prompt(content))

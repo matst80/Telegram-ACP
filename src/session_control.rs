@@ -40,6 +40,11 @@ pub enum SessionCommand {
     SetPermissionHandling {
         handling: PermissionHandling,
     },
+    ExecuteCommand {
+        command_id: String,
+        arguments: serde_json::Value,
+        result_tx: oneshot::Sender<Result<()>>,
+    },
 }
 
 fn flatten_select_options(

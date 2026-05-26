@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Telegram-ACP Terminal Client</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css">
+    <style>
+        :root {
+            --bg: #020617;
+            --panel: #0f172a;
+            --panel-2: #1e293b;
+            --text: #e2e8f0;
+            --muted: #94a3b8;
+            --accent: #38bdf8;
+            --danger: #ef4444;
+            --ok: #10b981;
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            margin: 0;
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+
+        header, .controls {
+            display: flex;
+            gap: 0.75rem;
+            align-items: center;
+            padding: 0.75rem 1rem;
+            background: var(--panel);
+            border-bottom: 1px solid #1f2937;
+            flex-wrap: wrap;
+        }
+
+        label {
+            font-size: 0.85rem;
+            color: var(--muted);
+            display: flex;
+            flex-direction: column;
+            gap: 0.35rem;
+        }
+
+        input {
+            min-width: 10rem;
+            padding: 0.55rem 0.7rem;
+            border-radius: 6px;
+            border: 1px solid #334155;
+            background: var(--panel-2);
+            color: var(--text);
+        }
+
+        button {
+            padding: 0.65rem 0.9rem;
+            border: none;
+            border-radius: 6px;
+            background: var(--accent);
+            color: var(--bg);
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        button.secondary {
+            background: #475569;
+            color: var(--text);
+        }
+
+        button.danger {
+            background: var(--danger);
+            color: white;
+        }
+
+        #status {
+            width: 0.7rem;
+            height: 0.7rem;
+            border-radius: 999px;
+            background: var(--danger);
+        }
+
+        #status.connected {
+            background: var(--ok);
+        }
+
+        #terminal {
+            flex: 1;
+            padding: 0.5rem;
+        }
+
+        #log {
+            height: 9rem;
+            overflow: auto;
+            background: #000;
+            color: #93c5fd;
+            font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+            padding: 0.75rem;
+            border-top: 1px solid #1f2937;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div id="status"></div>
+        <label>
+            WebSocket URL
+            <input id="ws-url" value="ws://127.0.0.1:9001">
+        </label>
+        <button id="connect-btn">Connect</button>
+        <button id="disconnect-btn" class="secondary">Disconnect</button>
+    </header>
+
+    <div class="controls">
+        <label>
+            Thread ID
+            <input id="thread-id" placeholder="optional">
+        </label>
+        <label>
+            Session ID
+            <input id="session-id" placeholder="optional">
+        </label>
+        <label>
+            CWD
+            <input id="cwd" placeholder="optional">
+        </label>
+        <label>
+            Command
+            <input id="command" placeholder="optional, e.g. bash -lc 'htop'">
+        </label>
+        <label>
+            Terminal ID
+            <input id="terminal-id" placeholder="filled after create">
+        </label>
+        <button id="create-btn">Create terminal</button>
+        <button id="attach-btn" class="secondary">Reconnect</button>
+        <button id="close-btn" class="danger">Close terminal</button>
+    </div>
+
+    <div id="terminal"></div>
+    <div id="log"></div>
+
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
+    <script>
+        const wsUrl = document.getElementById('ws-url');
+        const connectBtn = document.getElementById('connect-btn');
+        const disconnectBtn = document.getElementById('disconnect-btn');
+        const createBtn = document.getElementById('create-btn');
+        const attachBtn = document.getElementById('attach-btn');
+        const closeBtn = document.getElementById('close-btn');
+        const threadIdInput = document.getElementById('thread-id');
+        const sessionIdInput = document.getElementById('session-id');
+        const cwdInput = document.getElementById('cwd');
+        const commandInput = document.getElementById('command');
+        const terminalIdInput = document.getElementById('terminal-id');
+        const statusDot = document.getElementById('status');
+        const logEl = document.getElementById('log');
+
+        const term = new Terminal({
+            cursorBlink: true,
+            scrollback: 5000,
+            theme: {
+                background: '#020617',
+                foreground: '#e2e8f0'
+            }
+        });
+        const fitAddon = new FitAddon.FitAddon();
+        term.loadAddon(fitAddon);
+        term.open(document.getElementById('terminal'));
+        fitAddon.fit();
+
+        let ws = null;
+        let suppressResize = false;
+
+        function log(message) {
+            const line = document.createElement('div');
+            line.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            logEl.appendChild(line);
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+
+        function send(message) {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                log('WebSocket is not connected');
+                return;
+            }
+            ws.send(JSON.stringify(message));
+        }
+
+        function getTerminalSize() {
+            fitAddon.fit();
+            return { cols: term.cols || 80, rows: term.rows || 24 };
+        }
+
+        function parseOptionalInt(value) {
+            const trimmed = value.trim();
+            if (!trimmed) return undefined;
+            const parsed = Number.parseInt(trimmed, 10);
+            return Number.isFinite(parsed) ? parsed : undefined;
+        }
+
+        function parseCommand(value) {
+            const trimmed = value.trim();
+            if (!trimmed) return undefined;
+            return trimmed.match(/(?:[^\s"]+|"[^"]*")+/g)?.map(part => part.replace(/^"(.*)"$/, '$1'));
+        }
+
+        function bytesToBase64(bytes) {
+            let binary = '';
+            for (const byte of bytes) {
+                binary += String.fromCharCode(byte);
+            }
+            return btoa(binary);
+        }
+
+        function base64ToText(base64) {
+            const binary = atob(base64);
+            const bytes = Uint8Array.from(binary, c => c.charCodeAt(0));
+            return new TextDecoder().decode(bytes);
+        }
+
+        function connect() {
+            if (ws) {
+                ws.close();
+            }
+
+            ws = new WebSocket(wsUrl.value);
+            ws.onopen = () => {
+                statusDot.classList.add('connected');
+                log('Connected');
+                const terminalId = terminalIdInput.value.trim();
+                if (terminalId) {
+                    reconnectTerminal();
+                }
+            };
+
+            ws.onclose = () => {
+                statusDot.classList.remove('connected');
+                log('Disconnected');
+            };
+
+            ws.onerror = () => {
+                log('WebSocket error');
+            };
+
+            ws.onmessage = event => {
+                const message = JSON.parse(event.data);
+                handleMessage(message);
+            };
+        }
+
+        function disconnect() {
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+        }
+
+        function createTerminal() {
+            const size = getTerminalSize();
+            send({
+                type: 'create_terminal',
+                thread_id: parseOptionalInt(threadIdInput.value),
+                session_id: sessionIdInput.value.trim() || undefined,
+                cols: size.cols,
+                rows: size.rows,
+                cwd: cwdInput.value.trim() || undefined,
+                command: parseCommand(commandInput.value)
+            });
+        }
+
+        function reconnectTerminal() {
+            const terminalId = terminalIdInput.value.trim();
+            if (!terminalId) {
+                log('No terminal id set');
+                return;
+            }
+            const size = getTerminalSize();
+            send({
+                type: 'attach_terminal',
+                terminal_id: terminalId,
+                cols: size.cols,
+                rows: size.rows
+            });
+        }
+
+        function closeTerminal() {
+            const terminalId = terminalIdInput.value.trim();
+            if (!terminalId) {
+                log('No terminal id set');
+                return;
+            }
+            send({
+                type: 'close_terminal',
+                terminal_id: terminalId
+            });
+        }
+
+        function handleMessage(message) {
+            switch (message.type) {
+                case 'snapshot': {
+                    if (Array.isArray(message.terminals) && !terminalIdInput.value.trim() && message.terminals.length === 1) {
+                        terminalIdInput.value = message.terminals[0].terminal_id;
+                    }
+                    log(`Snapshot with ${message.terminals?.length || 0} terminal(s)`);
+                    break;
+                }
+                case 'terminal_created':
+                    terminalIdInput.value = message.terminal.terminal_id;
+                    log(`Created terminal ${message.terminal.terminal_id}`);
+                    break;
+                case 'terminal_attached':
+                    log(`Reconnected ${message.terminal_id} at ${message.cols}x${message.rows}`);
+                    break;
+                case 'terminal_output':
+                    term.write(base64ToText(message.data));
+                    break;
+                case 'terminal_snapshot':
+                    suppressResize = true;
+                    term.reset();
+                    term.resize(message.cols, message.rows);
+                    fitAddon.fit();
+                    term.write(base64ToText(message.data));
+                    suppressResize = false;
+                    log(`Snapshot for ${message.terminal_id} at ${message.cols}x${message.rows}`);
+                    break;
+                case 'terminal_resized':
+                    log(`Server resized ${message.terminal_id} to ${message.cols}x${message.rows}`);
+                    break;
+                case 'terminal_exited':
+                    log(`Terminal exited (${message.exit_code ?? 'unknown'})`);
+                    break;
+                case 'terminal_closed':
+                    log(`Terminal closed: ${message.terminal_id}`);
+                    break;
+                case 'terminal_error':
+                    log(`Terminal error: ${message.message}`);
+                    break;
+                default:
+                    break;
+            }
+        }
+
+        term.onData(data => {
+            const terminalId = terminalIdInput.value.trim();
+            if (!terminalId || !ws || ws.readyState !== WebSocket.OPEN) {
+                return;
+            }
+            const bytes = new TextEncoder().encode(data);
+            send({
+                type: 'terminal_input',
+                terminal_id: terminalId,
+                data: bytesToBase64(bytes)
+            });
+        });
+
+        term.onResize(({ cols, rows }) => {
+            if (suppressResize) {
+                return;
+            }
+            const terminalId = terminalIdInput.value.trim();
+            if (!terminalId || !ws || ws.readyState !== WebSocket.OPEN) {
+                return;
+            }
+            send({
+                type: 'terminal_resize',
+                terminal_id: terminalId,
+                cols,
+                rows
+            });
+        });
+
+        window.addEventListener('resize', () => {
+            fitAddon.fit();
+        });
+
+        connectBtn.addEventListener('click', connect);
+        disconnectBtn.addEventListener('click', disconnect);
+        createBtn.addEventListener('click', createTerminal);
+        attachBtn.addEventListener('click', reconnectTerminal);
+        closeBtn.addEventListener('click', closeTerminal);
+    </script>
+</body>
+</html>

@@ -1,7 +1,8 @@
-use acp::Agent;
+pub use agent_client_protocol::*;
 use agent_client_protocol as acp;
 use anyhow::Result;
 use dashmap::DashMap;
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,6 +22,56 @@ use crate::types::{AgentEvent, PermissionHandling};
 
 pub type SharedStderrTail = Arc<Mutex<VecDeque<String>>>;
 const STDERR_TAIL_MAX_LINES: usize = 50;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandRequest {
+    pub session_id: acp::SessionId,
+    pub command_id: String,
+    pub arguments: serde_json::Value,
+}
+
+impl CommandRequest {
+    pub fn new(
+        session_id: acp::SessionId,
+        command_id: String,
+        arguments: serde_json::Value,
+    ) -> Self {
+        Self {
+            session_id,
+            command_id,
+            arguments,
+        }
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+pub trait CommandExt {
+    async fn command(&self, req: CommandRequest) -> acp::Result<serde_json::Value>;
+}
+
+#[async_trait::async_trait(?Send)]
+impl CommandExt for acp::ClientSideConnection {
+    async fn command(&self, req: CommandRequest) -> acp::Result<serde_json::Value> {
+        let params_json = serde_json::to_string(&req).map_err(|e| {
+            acp::Error::new(acp::ErrorCode::InvalidParams.into(), e.to_string())
+        })?;
+        let params_raw = acp::RawValue::from_string(params_json).map_err(|e| {
+            acp::Error::new(acp::ErrorCode::InvalidParams.into(), e.to_string())
+        })?;
+        
+        let resp = self
+            .ext_method(acp::ExtRequest::new(
+                "command",
+                params_raw.into(),
+            ))
+            .await?;
+        
+        serde_json::to_value(&resp.0).map_err(|e| {
+            acp::Error::new(acp::ErrorCode::InternalError.into(), e.to_string())
+        })
+    }
+}
 
 pub struct SessionBootstrap {
     pub session_id: acp::SessionId,
@@ -158,7 +209,7 @@ impl acp::Client for TelegramClient {
                 .reply_markup(keyboard)
                 .await
                 .map_err(|e| {
-                    acp::Error::new(-32000, format!("Failed to send permission request: {e}"))
+                    acp::Error::new(acp::ErrorCode::InternalError.into(), format!("Failed to send permission request: {e}"))
                 })?;
             Some(sent)
         } else {
@@ -192,7 +243,7 @@ impl acp::Client for TelegramClient {
                         )
                         .await;
                 }
-                Err(acp::Error::new(-32000, "Permission request cancelled"))
+                Err(acp::Error::new(acp::ErrorCode::InternalError.into(), "Permission request cancelled"))
             }
         }
     }

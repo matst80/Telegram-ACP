@@ -11,6 +11,7 @@ use crate::relay::SessionEvent;
 use anyhow::Result;
 
 pub struct TopicEntry {
+    pub name: Option<String>,
     /// Currently running session, if any.
     pub active: Option<SessionEntry>,
     /// All sessions ever bound to this topic.
@@ -25,6 +26,7 @@ pub struct SessionEntry {
     pub project_path: PathBuf,
     pub agent_command: String,
     pub agent_name: Option<String>,
+    pub name: Arc<tokio::sync::Mutex<Option<String>>>,
     pub status: Arc<tokio::sync::Mutex<SessionStatus>>,
     pub available_commands: Arc<tokio::sync::Mutex<Vec<acp_sdk::AvailableCommand>>>,
     pub control_state: Arc<tokio::sync::Mutex<session_control::SessionControlState>>,
@@ -33,6 +35,7 @@ pub struct SessionEntry {
     pub command_tx: mpsc::UnboundedSender<SessionCommand>,
     pub cancel_tx: mpsc::UnboundedSender<oneshot::Sender<Result<()>>>,
     pub history: Arc<tokio::sync::Mutex<std::collections::VecDeque<SessionEvent>>>,
+    pub event_sink: Arc<dyn crate::relay::SessionEventSink>,
     pub telegram_thread_id: Arc<std::sync::atomic::AtomicI32>,
 }
 
@@ -107,6 +110,17 @@ impl SessionManager {
         Some(commands)
     }
 
+    pub fn get_session_event_sink_by_thread(
+        &self,
+        thread_id: i32,
+    ) -> Option<Arc<dyn crate::relay::SessionEventSink>> {
+        self.topics
+            .get(&thread_id)?
+            .active
+            .as_ref()
+            .map(|e| e.event_sink.clone())
+    }
+
     pub fn resolve_session_tx(
         &self,
         thread_id: Option<i32>,
@@ -123,6 +137,26 @@ impl SessionManager {
         }
         if let Some(tid) = thread_id {
             return self.get_session_command_tx_by_thread(tid);
+        }
+        None
+    }
+
+    pub fn resolve_thread_id(
+        &self,
+        thread_id: Option<i32>,
+        session_id: Option<String>,
+    ) -> Option<i32> {
+        if let Some(tid) = thread_id {
+            return Some(tid);
+        }
+        if let Some(sid) = session_id {
+            for entry in self.topics.iter() {
+                if let Some(active) = &entry.value().active {
+                    if active.acp_session_id.as_deref() == Some(&sid) {
+                        return Some(*entry.key());
+                    }
+                }
+            }
         }
         None
     }
@@ -164,10 +198,22 @@ impl SessionManager {
             let thread_id = *entry.key();
             let topic = entry.value();
             let active_session_id = topic.active.as_ref().and_then(|s| s.acp_session_id.clone());
+
+            let mut sessions = topic.history.clone();
+            if let Some(active) = &topic.active {
+                if let Some(sid) = &active.acp_session_id {
+                    if let Some(record) = sessions.iter_mut().find(|r| &r.acp_session_id == sid) {
+                        let history = active.history.lock().await;
+                        record.history = history.iter().cloned().collect();
+                    }
+                }
+            }
+
             persisted.push(crate::persistence::PersistedTopic {
                 thread_id,
+                name: topic.name.clone(),
                 active_session_id,
-                sessions: topic.history.clone(),
+                sessions,
             });
         }
         if let Err(e) = crate::persistence::save_topics(&persisted) {

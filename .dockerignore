@@ -1,0 +1,11 @@
+.git
+.github
+target
+.agents
+scratch
+.copilot
+*.log
+*.tmp
+Dockerfile
+terminal-client.html
+test-client.html
