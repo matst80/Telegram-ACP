@@ -76,7 +76,7 @@ Env overrides are also supported:
 
 When `websocket_bind` is set, the daemon starts a websocket listener and broadcasts each `SessionEvent` as a JSON text frame. The stream includes user prompts, agent updates, and session lifecycle events for every thread.
 
-If `websocket_clipboard = true` is also set, the daemon polls the local system clipboard and emits `clipboard_updated` websocket events when the clipboard content changes. This is disabled by default because clipboard contents often contain secrets.
+The daemon also polls the local system clipboard and emits `clipboard_updated` websocket events when the clipboard content changes. Set `websocket_clipboard = false` to disable it if you do not want host clipboard contents broadcast to websocket clients.
 
 ## Docker
 

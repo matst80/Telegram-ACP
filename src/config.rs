@@ -108,7 +108,7 @@ impl Config {
             file_config.websocket_clipboard.map(|value| value.to_string()),
         )
         .map(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-        .unwrap_or(false);
+        .unwrap_or(true);
         let websocket_clipboard_poll_ms = env_or(
             "TELEGRAM_ACP_WEBSOCKET_CLIPBOARD_POLL_MS",
             file_config.websocket_clipboard_poll_ms.map(|value| value.to_string()),
