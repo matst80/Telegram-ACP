@@ -69,6 +69,11 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         projects: Vec<ProjectInfo>,
     },
+    ClipboardUpdated {
+        source: String,
+        content: String,
+        truncated: bool,
+    },
 }
 
 #[async_trait]
@@ -352,5 +357,20 @@ mod tests {
         } else {
             panic!("wrong command variant");
         }
+    }
+
+    #[test]
+    fn clipboard_event_serializes_with_snake_case_tag() {
+        let event = SessionEvent::ClipboardUpdated {
+            source: "pbpaste".to_string(),
+            content: "hello".to_string(),
+            truncated: false,
+        };
+
+        let value = serde_json::to_value(event).unwrap();
+        assert_eq!(value["type"], "clipboard_updated");
+        assert_eq!(value["source"], "pbpaste");
+        assert_eq!(value["content"], "hello");
+        assert_eq!(value["truncated"], false);
     }
 }

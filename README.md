@@ -51,6 +51,7 @@ bot_token = "<telegram-bot-token>"
 chat_id = 123456789
 default_agent = "claude"
 # websocket_bind = "127.0.0.1:9001"
+# websocket_clipboard = true
 
 [claude]
 cmd = "claude-agent-acp"
@@ -67,10 +68,15 @@ Env overrides are also supported:
 - `TELEGRAM_ACP_CHAT_ID`
 - `TELEGRAM_ACP_SOCKET_PATH`
 - `TELEGRAM_ACP_WEBSOCKET_BIND`
+- `TELEGRAM_ACP_WEBSOCKET_CLIPBOARD`
+- `TELEGRAM_ACP_WEBSOCKET_CLIPBOARD_POLL_MS`
+- `TELEGRAM_ACP_WEBSOCKET_CLIPBOARD_MAX_BYTES`
 - `TELEGRAM_ACP_DEFAULT_AGENT`
 - `TELEGRAM_ACP_TELEGRAPH_AUTHOR`
 
 When `websocket_bind` is set, the daemon starts a websocket listener and broadcasts each `SessionEvent` as a JSON text frame. The stream includes user prompts, agent updates, and session lifecycle events for every thread.
+
+If `websocket_clipboard = true` is also set, the daemon polls the local system clipboard and emits `clipboard_updated` websocket events when the clipboard content changes. This is disabled by default because clipboard contents often contain secrets.
 
 # Hacking
 

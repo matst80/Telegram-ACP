@@ -18,6 +18,7 @@ All messages sent by the server are JSON objects with a `type` field at the top 
 | `session_started` | A new session was created | Server -> Client |
 | `user_prompt` | User sent a prompt to an agent | Server -> Client |
 | `agent_update` | Agent activity (thinking, typing, tool calls) | Server -> Client |
+| `clipboard_updated` | Local system clipboard changed | Server -> Client |
 | `session_switched` | Active session in a topic was changed | Server -> Client |
 | `session_ended` | Agent session terminated | Server -> Client |
 | `session_removed` | Agent session and topic removed | Server -> Client |
@@ -157,7 +158,34 @@ Broadcast when a user sends a message via Telegram.
 
 ---
 
-### 4. `session_started` / `session_switched` / `session_ended` / `session_removed`
+### 4. `clipboard_updated`
+Broadcast when the daemon's optional clipboard watcher detects that the local system clipboard content has changed.
+
+This event is daemon-scoped, not session-scoped: it does not include `thread_id` or `acp_session_id`.
+
+**Structure:**
+```json
+{
+  "type": "clipboard_updated",
+  "source": "pbpaste | wl-paste | xclip | xsel",
+  "content": "string",
+  "truncated": "boolean"
+}
+```
+
+**Fields:**
+- `source`: The clipboard backend used on the host machine.
+- `content`: Clipboard text content. This is emitted as UTF-8 text; non-UTF-8 bytes are lossy-decoded.
+- `truncated`: `true` when the clipboard content exceeded the configured byte limit and was cut before sending.
+
+**Notes:**
+- This event is only emitted when clipboard relay is explicitly enabled.
+- Clipboard updates are not included in per-session history; they are broadcast live to connected websocket clients.
+- The first observed clipboard value after the watcher starts is sent as a `clipboard_updated` event.
+
+---
+
+### 5. `session_started` / `session_switched` / `session_ended` / `session_removed`
 Broadcast when a session begins, is resumed, terminates, or is removed.
 
 **Structure:**
@@ -189,6 +217,29 @@ Broadcast when a session begins, is resumed, terminates, or is removed.
   "thread_id": "number"
 }
 ```
+
+---
+
+## Clipboard Relay Configuration
+
+Clipboard relay is disabled by default.
+
+Enable it with these config keys or environment variables:
+
+- `websocket_clipboard` or `TELEGRAM_ACP_WEBSOCKET_CLIPBOARD`
+- `websocket_clipboard_poll_ms` or `TELEGRAM_ACP_WEBSOCKET_CLIPBOARD_POLL_MS`
+- `websocket_clipboard_max_bytes` or `TELEGRAM_ACP_WEBSOCKET_CLIPBOARD_MAX_BYTES`
+
+Example:
+
+```toml
+websocket_bind = "0.0.0.0:9001"
+websocket_clipboard = true
+websocket_clipboard_poll_ms = 750
+websocket_clipboard_max_bytes = 4096
+```
+
+Security note: clipboard contents often contain secrets, tokens, or personal data. Only enable this on trusted machines and trusted websocket networks.
 
 ---
 
