@@ -1,5 +1,5 @@
 # Variables
-RAG_TOKEN ?= rag_mcp_rqG7xhAR19mj5iddaUM8I2XxoLp3s6mA-GcEVpaMg34
+RAG_TOKEN ?= rag_mcp_INf7UYdETxj9WgIDII6sCFoDq5UfWhG0NeKgL5iaHqg
 RAG_URL ?= https://rag.k6n.net/api/acp/register
 RAG_NAME ?= acp-maxi
 RAG_HOST ?= 10.10.10.205

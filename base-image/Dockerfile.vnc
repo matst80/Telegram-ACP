@@ -5,7 +5,7 @@ FROM ${OS_IMAGE}
 # Prevent interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install system dependencies
+# Install system dependencies (include Xfce desktop for VNC sessions)
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     curl \
@@ -21,7 +21,19 @@ RUN apt-get update && apt-get install -y \
     tmux \
     zsh \
     openssh-client \
+    chromium \
     unzip \
+    xvfb \
+    x11vnc \
+    novnc \
+    websockify \
+    xterm \
+    xfce4 \
+    xfce4-goodies \
+    xfce4-terminal \
+    xfce4-clipman \
+    dbus-x11 \
+    xinit \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Node.js LTS
@@ -44,12 +56,6 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 RUN curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/$(dpkg --print-architecture)/kubectl" \
     && chmod +x kubectl \
     && mv kubectl /usr/local/bin/
-
-# Install k9s
-RUN K9S_VERSION=$(curl -sL -w "%{url_effective}" -o /dev/null https://github.com/derailed/k9s/releases/latest | awk -F/ '{print $NF}') \
-    && curl -LO "https://github.com/derailed/k9s/releases/download/${K9S_VERSION}/k9s_Linux_$(dpkg --print-architecture).tar.gz" \
-    && tar -xzf "k9s_Linux_$(dpkg --print-architecture).tar.gz" -C /usr/local/bin k9s \
-    && rm "k9s_Linux_$(dpkg --print-architecture).tar.gz"
 
 # Install GitHub CLI
 RUN type -p curl >/dev/null || (apt-get update && apt-get install curl -y) \
@@ -83,13 +89,42 @@ RUN curl -fsSL https://claude.ai/install.sh | bash
 # Setup directories
 #RUN mkdir -p /data/db /data/static-site /data/templates /data/schemas /root/.ssh && chmod 700 /root/.ssh
 
-
+# Add VNC startup script
+COPY vnc-startup.sh /usr/local/bin/vnc-startup.sh
+RUN chmod +x /usr/local/bin/vnc-startup.sh
 #RUN rm -rf /root/.oh-my-zsh
 #RUN sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"
 
 # Install VS Code CLI (includes `code tunnel`) and put it on PATH
-RUN curl -Lk 'https://code.visualstudio.com/sha/download?build=stable&os=cli-alpine-x64' --output vscode_cli.tar.gz \
-    && tar -xf vscode_cli.tar.gz -C /usr/local/bin \
-    && rm vscode_cli.tar.gz
+RUN curl -Lk 'https://code.visualstudio.com/sha/download?build=stable&os=cli-alpine-x64' --output vscode_cli.tar.gz
+RUN tar -xf vscode_cli.tar.gz
 
+EXPOSE 6080
 
+# Add a wrapper to allow running Chromium as root by default (appends --no-sandbox)
+RUN cat > /usr/local/bin/chromium-wrapper <<'EOF' && \
+chmod +x /usr/local/bin/chromium-wrapper && \
+ln -sf /usr/local/bin/chromium-wrapper /usr/local/bin/chromium && \
+ln -sf /usr/local/bin/chromium-wrapper /usr/local/bin/chromium-browser
+#!/bin/sh
+REAL=""
+for p in /usr/bin/chromium /usr/bin/chromium-browser /usr/bin/chromium-stable; do
+    if [ -x "$p" ]; then
+        REAL="$p"
+        break
+    fi
+done
+if [ -z "$REAL" ]; then
+    exec chromium --no-sandbox "$@"
+else
+    exec "$REAL" --no-sandbox "$@"
+fi
+EOF
+
+# Set up custom Chromium desktop entry with --no-sandbox as default browser
+RUN mkdir -p /root/.local/share/applications/ && \
+    cp /usr/share/applications/chromium.desktop /root/.local/share/applications/chromium-nosandbox.desktop && \
+    sed -i 's|Exec=/usr/bin/chromium|Exec=/usr/bin/chromium --no-sandbox|' /root/.local/share/applications/chromium-nosandbox.desktop && \
+    sed -i 's|Name=Chromium|Name=Chromium (No Sandbox)|' /root/.local/share/applications/chromium-nosandbox.desktop && \
+    update-desktop-database /root/.local/share/applications/ && \
+    xdg-settings set default-web-browser chromium-nosandbox.desktop

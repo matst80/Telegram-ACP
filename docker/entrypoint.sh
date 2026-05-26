@@ -49,6 +49,16 @@ if [ ! -f "$CONFIG_FILE" ]; then
 fi
 
 if [ "${1:-}" = "telegram-acp" ] && [ "${2:-}" = "daemon" ]; then
+    if command -v code >/dev/null 2>&1; then
+        echo "Starting VS Code tunnel..."
+        export VSCODE_CLI_USE_FILE_KEYCHAIN=1
+        if [ -n "${VSCODE_TUNNEL_NAME:-}" ]; then
+            code tunnel --accept-server-license-terms --name "${VSCODE_TUNNEL_NAME}" --no-sleep &
+        else
+            code tunnel --accept-server-license-terms --no-sleep &
+        fi
+    fi
+
     set -- "$@" \
         --websocket-bind "${TELEGRAM_ACP_WEBSOCKET_BIND:-0.0.0.0:9001}"
 

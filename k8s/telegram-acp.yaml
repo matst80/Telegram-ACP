@@ -54,14 +54,6 @@ spec:
       port: 9001
       targetPort: 9001
       protocol: TCP
-    - name: novnc
-      port: 6080
-      targetPort: 6080
-      protocol: TCP
-    - name: vnc
-      port: 5900
-      targetPort: 5900
-      protocol: TCP
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -102,15 +94,9 @@ spec:
           image: registry.k6n.net/matst80/code-acp:latest
           imagePullPolicy: Always
           command:
-            - /bin/sh
-            - -c
-            - |
-              if [ -x /usr/local/bin/vnc-startup.sh ]; then
-                echo "Starting VNC server in background..."
-                /usr/local/bin/vnc-startup.sh &
-              fi
-              echo "Starting telegram-acp daemon..."
-              exec /usr/local/bin/telegram-acp-entrypoint telegram-acp daemon
+            - /usr/local/bin/telegram-acp-entrypoint
+            - telegram-acp
+            - daemon
           env:
             - name: TELEGRAM_ACP_BOT_TOKEN
               valueFrom:
@@ -142,10 +128,6 @@ spec:
           ports:
             - containerPort: 9001
               name: websocket
-            - containerPort: 6080
-              name: novnc
-            - containerPort: 5900
-              name: vnc
           volumeMounts:
             - name: root-volume
               mountPath: /root

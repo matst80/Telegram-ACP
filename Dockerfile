@@ -34,6 +34,6 @@ COPY docker/entrypoint.sh /usr/local/bin/telegram-acp-entrypoint
 RUN mkdir -p /root/.config/telegram-acp /workspace \
     && chmod +x /usr/local/bin/telegram-acp-entrypoint
 
-EXPOSE 9001 5900
+EXPOSE 9001
 
 CMD ["/usr/local/bin/telegram-acp-entrypoint", "telegram-acp", "daemon","--rag-register-url","https://rag.k6n.net/api/acp/register"]
