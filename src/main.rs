@@ -1,5 +1,6 @@
 mod acp;
 mod commands;
+mod clipboard;
 mod config;
 mod daemon;
 mod formatting;

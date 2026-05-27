@@ -1673,6 +1673,13 @@ pub async fn run_daemon(config: Config) -> Result<()> {
         let websocket_events = websocket_events.expect("websocket sink missing");
         let state_provider = daemon.clone() as Arc<dyn SessionStateProvider>;
         let command_handler = daemon.clone() as Arc<dyn crate::relay::WebSocketCommandHandler>;
+        if config.websocket_clipboard {
+            crate::clipboard::spawn_watcher(
+                daemon.session_event_sink.clone(),
+                config.websocket_clipboard_poll_ms,
+                config.websocket_clipboard_max_bytes,
+            );
+        }
         if let Ok(addr) = bind_addr.parse::<std::net::SocketAddr>() {
             tracing::info!(bind_addr = %bind_addr, port = addr.port(), "Attempting to start mDNS advertising");
             match crate::websocket::advertise_service(addr.port()) {
@@ -1711,6 +1718,8 @@ pub async fn run_daemon(config: Config) -> Result<()> {
         });
     } else if config.rag_register_url.is_some() {
         tracing::warn!("RAG registration URL provided but websocket_bind is not set. RAG registration requires an active websocket server.");
+    } else if config.websocket_clipboard {
+        tracing::warn!("Clipboard websocket relay is enabled but websocket_bind is not set.");
     }
 
     let local_daemon = daemon.clone();

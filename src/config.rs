@@ -28,6 +28,9 @@ pub struct Config {
     pub default_agent: String,
     pub agents: HashMap<String, String>,
     pub websocket_history_limit: usize,
+    pub websocket_clipboard: bool,
+    pub websocket_clipboard_poll_ms: u64,
+    pub websocket_clipboard_max_bytes: usize,
     pub mcp_servers: HashMap<String, FileMcpServerConfig>,
     pub rag_register_url: Option<String>,
     pub rag_token: Option<String>,
@@ -45,6 +48,9 @@ struct FileConfig {
     socket_path: Option<PathBuf>,
     websocket_bind: Option<String>,
     websocket_history_limit: Option<usize>,
+    websocket_clipboard: Option<bool>,
+    websocket_clipboard_poll_ms: Option<u64>,
+    websocket_clipboard_max_bytes: Option<usize>,
     default_agent: Option<String>,
     #[serde(alias = "mcpServers")]
     mcp_servers: Option<HashMap<String, FileMcpServerConfig>>,
@@ -97,6 +103,24 @@ impl Config {
         )
         .and_then(|l| l.parse().ok())
         .unwrap_or(20);
+        let websocket_clipboard = env_or(
+            "TELEGRAM_ACP_WEBSOCKET_CLIPBOARD",
+            file_config.websocket_clipboard.map(|value| value.to_string()),
+        )
+        .map(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(true);
+        let websocket_clipboard_poll_ms = env_or(
+            "TELEGRAM_ACP_WEBSOCKET_CLIPBOARD_POLL_MS",
+            file_config.websocket_clipboard_poll_ms.map(|value| value.to_string()),
+        )
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(750);
+        let websocket_clipboard_max_bytes = env_or(
+            "TELEGRAM_ACP_WEBSOCKET_CLIPBOARD_MAX_BYTES",
+            file_config.websocket_clipboard_max_bytes.map(|value| value.to_string()),
+        )
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(4096);
 
         let agents = parse_agents(&file_config.extra_tables);
         let default_agent = env_or("TELEGRAM_ACP_DEFAULT_AGENT", file_config.default_agent)
@@ -143,6 +167,9 @@ impl Config {
             default_agent,
             agents,
             websocket_history_limit,
+            websocket_clipboard,
+            websocket_clipboard_poll_ms,
+            websocket_clipboard_max_bytes,
             mcp_servers,
             rag_register_url,
             rag_token,

@@ -18,11 +18,13 @@ All messages sent by the server are JSON objects with a `type` field at the top 
 | `session_started` | A new session was created | Server -> Client |
 | `user_prompt` | User sent a prompt to an agent | Server -> Client |
 | `agent_update` | Agent activity (thinking, typing, tool calls) | Server -> Client |
+| `clipboard_updated` | Local system clipboard changed | Server -> Client |
 | `session_switched` | Active session in a topic was changed | Server -> Client |
 | `session_ended` | Agent session terminated | Server -> Client |
 | `session_removed` | Agent session and topic removed | Server -> Client |
 | `send_prompt` | Send a command to the agent | Client -> Server |
 | `cancel` | Interrupt current agent task | Client -> Server |
+| `create_terminal` | Spawn a PTY-backed terminal process | Client -> Server |
 
 ---
 
@@ -40,16 +42,44 @@ Sent immediately upon connection. Contains metadata and recent history for all a
       "acp_session_id": "string",
       "project_path": "string",
       "status": "Initializing | Idle | Prompting | Finished | Error",
-      "thread_id": "number",
+      "thread_id": "number | null",
+      "name": "string | null",
       "agent_command": "string",
       "agent_name": "string | null",
+      "available_commands": [
+        "Array of ACP AvailableCommand objects"
+      ],
       "history": [
         "Array of SessionEvent objects (see below)"
       ]
     }
+  ],
+  "projects": [
+    {
+      "name": "string",
+      "path": "string"
+    }
+  ],
+  "terminals": [
+    {
+      "terminal_id": "string",
+      "thread_id": "number | null",
+      "session_id": "string | null",
+      "cwd": "string",
+      "command": ["string", "..."],
+      "cols": "number",
+      "rows": "number",
+      "running": "boolean",
+      "exit_code": "number | null"
+    }
   ]
 }
 ```
+
+**Notes:**
+- `projects` is included when `project_root` is configured and the daemon can enumerate child directories.
+- `terminals` lists currently known PTY-backed terminals and is omitted when empty.
+- `available_commands` is omitted when empty.
 
 ---
 
@@ -157,7 +187,34 @@ Broadcast when a user sends a message via Telegram.
 
 ---
 
-### 4. `session_started` / `session_switched` / `session_ended` / `session_removed`
+### 4. `clipboard_updated`
+Broadcast when the daemon's optional clipboard watcher detects that the local system clipboard content has changed.
+
+This event is daemon-scoped, not session-scoped: it does not include `thread_id` or `acp_session_id`.
+
+**Structure:**
+```json
+{
+  "type": "clipboard_updated",
+  "source": "pbpaste | wl-paste | xclip | xsel",
+  "content": "string",
+  "truncated": "boolean"
+}
+```
+
+**Fields:**
+- `source`: The clipboard backend used on the host machine.
+- `content`: Clipboard text content. This is emitted as UTF-8 text; non-UTF-8 bytes are lossy-decoded.
+- `truncated`: `true` when the clipboard content exceeded the configured byte limit and was cut before sending.
+
+**Notes:**
+- This event is only emitted when clipboard relay is explicitly enabled.
+- Clipboard updates are not included in per-session history; they are broadcast live to connected websocket clients.
+- The first observed clipboard value after the watcher starts is sent as a `clipboard_updated` event.
+
+---
+
+### 5. `session_started` / `session_switched` / `session_ended` / `session_removed`
 Broadcast when a session begins, is resumed, terminates, or is removed.
 
 **Structure:**
@@ -191,6 +248,73 @@ Broadcast when a session begins, is resumed, terminates, or is removed.
   "thread_id": "number"
 }
 ```
+
+### 3. `create_terminal`
+Create a new PTY-backed terminal owned by the daemon.
+
+**Structure:**
+```json
+{
+  "type": "create_terminal",
+  "thread_id": "number | null",
+  "session_id": "string | null",
+  "cols": "number",
+  "rows": "number",
+  "cwd": "string | null",
+  "command": ["string", "..."]
+}
+```
+
+**Fields:**
+- `thread_id`: Optional Telegram thread id to associate with the terminal.
+- `session_id`: Optional ACP session id to associate with the terminal. If `thread_id` is omitted, the daemon can use this to resolve the related session context.
+- `cols`: Initial terminal width in columns. Must be greater than `0`.
+- `rows`: Initial terminal height in rows. Must be greater than `0`.
+- `cwd`: Optional working directory. If relative and a session/project context is available, it is resolved relative to that project path.
+- `command`: Optional command argv vector. If omitted, the daemon starts the default shell for the host environment.
+
+**Behavior:**
+- If `cwd` is omitted, the daemon defaults to the associated project path when a session/thread is resolved.
+- If there is no associated project path, it falls back to `project_root` when configured, otherwise the daemon's current working directory.
+- If the resolved `cwd` does not exist or is not a directory, the command fails.
+- On success, the server emits `terminal_created`, followed by `terminal_snapshot`, and then streams `terminal_output` events as data arrives.
+
+**Example:**
+```json
+{
+  "type": "create_terminal",
+  "thread_id": 123,
+  "cols": 120,
+  "rows": 36,
+  "cwd": ".",
+  "command": ["zsh"]
+}
+```
+
+---
+
+## Clipboard Relay Configuration
+
+Clipboard relay is enabled by default whenever the websocket server is enabled.
+
+Enable it with these config keys or environment variables:
+
+- `websocket_clipboard` or `TELEGRAM_ACP_WEBSOCKET_CLIPBOARD`
+- `websocket_clipboard_poll_ms` or `TELEGRAM_ACP_WEBSOCKET_CLIPBOARD_POLL_MS`
+- `websocket_clipboard_max_bytes` or `TELEGRAM_ACP_WEBSOCKET_CLIPBOARD_MAX_BYTES`
+
+Set `websocket_clipboard = false` or `TELEGRAM_ACP_WEBSOCKET_CLIPBOARD=false` to turn it off.
+
+Example:
+
+```toml
+websocket_bind = "0.0.0.0:9001"
+websocket_clipboard = true
+websocket_clipboard_poll_ms = 750
+websocket_clipboard_max_bytes = 4096
+```
+
+Security note: clipboard contents often contain secrets, tokens, or personal data. Only enable this on trusted machines and trusted websocket networks.
 
 ---
 
