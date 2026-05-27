@@ -19,12 +19,20 @@ All messages sent by the server are JSON objects with a `type` field at the top 
 | `user_prompt` | User sent a prompt to an agent | Server -> Client |
 | `agent_update` | Agent activity (thinking, typing, tool calls) | Server -> Client |
 | `clipboard_updated` | Local system clipboard changed | Server -> Client |
+| `terminal_created` | A terminal was created | Server -> Client |
+| `terminal_output` | Terminal emitted output bytes | Server -> Client |
+| `terminal_snapshot` | Full terminal screen snapshot | Server -> Client |
+| `terminal_exited` | Terminal process exited | Server -> Client |
+| `terminal_closed` | Terminal was removed from the daemon | Server -> Client |
+| `directory_suggestions` | Directory typeahead suggestions for path inputs | Server -> Client |
 | `session_switched` | Active session in a topic was changed | Server -> Client |
 | `session_ended` | Agent session terminated | Server -> Client |
 | `session_removed` | Agent session and topic removed | Server -> Client |
 | `send_prompt` | Send a command to the agent | Client -> Server |
 | `cancel` | Interrupt current agent task | Client -> Server |
 | `create_terminal` | Spawn a PTY-backed terminal process | Client -> Server |
+| `close_terminal` | Terminate and remove a terminal | Client -> Server |
+| `list_directories` | Request directory suggestions for typeahead | Client -> Server |
 
 ---
 
@@ -37,6 +45,7 @@ Sent immediately upon connection. Contains metadata and recent history for all a
 ```json
 {
   "type": "snapshot",
+  "rag_register_name": "string | null",
   "sessions": [
     {
       "acp_session_id": "string",
@@ -77,9 +86,11 @@ Sent immediately upon connection. Contains metadata and recent history for all a
 ```
 
 **Notes:**
+- `rag_register_name` is the daemon identity configured via `--rag-register-name` or `TELEGRAM_ACP_RAG_REGISTER_NAME`.
 - `projects` is included when `project_root` is configured and the daemon can enumerate child directories.
 - `terminals` lists currently known PTY-backed terminals and is omitted when empty.
 - `available_commands` is omitted when empty.
+- `agent_name` is the configured ACP alias for the session, such as `claude`, `codex`, or `copilot`.
 
 ---
 
@@ -208,7 +219,7 @@ This event is daemon-scoped, not session-scoped: it does not include `thread_id`
 - `truncated`: `true` when the clipboard content exceeded the configured byte limit and was cut before sending.
 
 **Notes:**
-- This event is only emitted when clipboard relay is explicitly enabled.
+- This event is emitted whenever clipboard relay is enabled. Clipboard relay is on by default when the websocket server is enabled unless `websocket_clipboard` is set to `false`.
 - Clipboard updates are not included in per-session history; they are broadcast live to connected websocket clients.
 - The first observed clipboard value after the watcher starts is sent as a `clipboard_updated` event.
 
@@ -227,6 +238,106 @@ Broadcast when a session begins, is resumed, terminates, or is removed.
   "name": "string | null (for session_started/session_switched)"
 }
 ```
+
+---
+
+### 6. `terminal_created`
+Broadcast after a new PTY-backed terminal has been created.
+
+**Structure:**
+```json
+{
+  "type": "terminal_created",
+  "terminal": {
+    "terminal_id": "string",
+    "thread_id": "number | null",
+    "session_id": "string | null",
+    "cwd": "string",
+    "command": ["string", "..."],
+    "cols": "number",
+    "rows": "number",
+    "running": "boolean",
+    "exit_code": "number | null"
+  }
+}
+```
+
+### 7. `terminal_output`
+Broadcast when terminal output arrives. `data` is base64-encoded raw output bytes.
+
+**Structure:**
+```json
+{
+  "type": "terminal_output",
+  "terminal_id": "string",
+  "sequence": "number",
+  "data": "base64-string"
+}
+```
+
+### 8. `terminal_snapshot`
+Broadcast as a full-screen terminal snapshot. `data` is base64-encoded formatted screen state.
+
+**Structure:**
+```json
+{
+  "type": "terminal_snapshot",
+  "terminal_id": "string",
+  "sequence": "number",
+  "cols": "number",
+  "rows": "number",
+  "cursor_row": "number",
+  "cursor_col": "number",
+  "data": "base64-string",
+  "running": "boolean"
+}
+```
+
+### 9. `terminal_exited` / `terminal_closed`
+Broadcast when a terminal process exits and when the daemon removes that terminal.
+
+**Structure:**
+```json
+{
+  "type": "terminal_exited",
+  "terminal_id": "string",
+  "exit_code": "number | null"
+}
+```
+
+```json
+{
+  "type": "terminal_closed",
+  "terminal_id": "string"
+}
+```
+
+**Behavior:**
+- If a terminal is explicitly terminated via `close_terminal`, the daemon kills it and emits `terminal_closed`.
+- If a terminal exits or is killed outside the app, the daemon emits `terminal_exited` and then automatically removes it, followed by `terminal_closed`.
+- After automatic removal, that terminal no longer appears in later `snapshot` payloads.
+
+### 10. `directory_suggestions`
+Broadcast in response to `list_directories`. This is intended for path input typeahead, for example resolving `~/` to directories under the caller's home directory.
+
+**Structure:**
+```json
+{
+  "type": "directory_suggestions",
+  "query": "string",
+  "directories": [
+    {
+      "path": "string"
+    }
+  ]
+}
+```
+
+**Behavior:**
+- Only directories are returned.
+- Suggestions preserve the caller's path style. For example, `~/github.com/ma` returns values like `~/github.com/matst80/`.
+- Matching is case-insensitive and uses substring matching on the final path segment.
+- Relative paths are resolved against the associated session project when `thread_id` or `session_id` is supplied.
 
 ---
 
@@ -278,6 +389,7 @@ Create a new PTY-backed terminal owned by the daemon.
 - If there is no associated project path, it falls back to `project_root` when configured, otherwise the daemon's current working directory.
 - If the resolved `cwd` does not exist or is not a directory, the command fails.
 - On success, the server emits `terminal_created`, followed by `terminal_snapshot`, and then streams `terminal_output` events as data arrives.
+- If the terminal later exits on its own, the server emits `terminal_exited` and then `terminal_closed`.
 
 **Example:**
 ```json
@@ -291,6 +403,40 @@ Create a new PTY-backed terminal owned by the daemon.
 }
 ```
 
+### 4. `close_terminal`
+Terminate and remove an existing terminal.
+
+**Structure:**
+```json
+{
+  "type": "close_terminal",
+  "terminal_id": "string"
+}
+```
+
+### 5. `list_directories`
+Request directory suggestions for path typeahead.
+
+**Structure:**
+```json
+{
+  "type": "list_directories",
+  "thread_id": "number | null",
+  "session_id": "string | null",
+  "query": "string"
+}
+```
+
+**Fields:**
+- `thread_id`: Optional Telegram thread id used to resolve project-relative paths.
+- `session_id`: Optional ACP session id used to resolve project-relative paths when `thread_id` is omitted.
+- `query`: Partial path being completed. Examples: `~/`, `~/github.com/ma`, `.`, `src/han`.
+
+**Behavior:**
+- `~/` expands to the caller's home directory and returns all immediate child directories.
+- Partial final path segments filter by substring match. For example, `~/github.com/ma` matches directories whose basename contains `ma`.
+- Results are returned in a `directory_suggestions` event.
+
 ---
 
 ## Clipboard Relay Configuration
@@ -300,16 +446,20 @@ Clipboard relay is enabled by default whenever the websocket server is enabled.
 Enable it with these config keys or environment variables:
 
 - `websocket_clipboard` or `TELEGRAM_ACP_WEBSOCKET_CLIPBOARD`
+- `global_clipboard_intercept` or `TELEGRAM_ACP_GLOBAL_CLIPBOARD_INTERCEPT`
 - `websocket_clipboard_poll_ms` or `TELEGRAM_ACP_WEBSOCKET_CLIPBOARD_POLL_MS`
 - `websocket_clipboard_max_bytes` or `TELEGRAM_ACP_WEBSOCKET_CLIPBOARD_MAX_BYTES`
 
 Set `websocket_clipboard = false` or `TELEGRAM_ACP_WEBSOCKET_CLIPBOARD=false` to turn it off.
+
+Global clipboard interception is a separate opt-in. On macOS it defaults to off, so websocket clipboard relay will not start the global clipboard listener unless `--global-clipboard-intercept`, `global_clipboard_intercept = true`, or `TELEGRAM_ACP_GLOBAL_CLIPBOARD_INTERCEPT=true` is set.
 
 Example:
 
 ```toml
 websocket_bind = "0.0.0.0:9001"
 websocket_clipboard = true
+global_clipboard_intercept = true
 websocket_clipboard_poll_ms = 750
 websocket_clipboard_max_bytes = 4096
 ```

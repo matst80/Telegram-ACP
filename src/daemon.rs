@@ -83,6 +83,94 @@ impl DaemonHandle {
         projects
     }
 
+    fn home_dir() -> Option<PathBuf> {
+        std::env::var_os("HOME").map(PathBuf::from)
+    }
+
+    fn split_directory_query(query: &str) -> (String, String) {
+        if query.ends_with('/') {
+            return (query.to_string(), String::new());
+        }
+
+        match query.rsplit_once('/') {
+            Some((base, fragment)) => (format!("{base}/"), fragment.to_string()),
+            None => (String::new(), query.to_string()),
+        }
+    }
+
+    fn resolve_directory_base(
+        &self,
+        raw_base: &str,
+        project_path: Option<&PathBuf>,
+    ) -> Result<PathBuf> {
+        if raw_base.is_empty() {
+            let resolved = project_path
+                .cloned()
+                .or_else(|| self.config.project_root.clone())
+                .unwrap_or(std::env::current_dir()?);
+            return Ok(resolved);
+        }
+
+        if raw_base == "~/" || raw_base.starts_with("~/") {
+            let home = Self::home_dir().ok_or_else(|| anyhow::anyhow!("HOME is not set"))?;
+            let relative = raw_base.trim_start_matches("~/");
+            return Ok(home.join(relative));
+        }
+
+        let base_path = PathBuf::from(raw_base);
+        if base_path.is_absolute() {
+            return Ok(base_path);
+        }
+
+        let resolved = if let Some(project_path) = project_path {
+            project_path.join(&base_path)
+        } else {
+            self.resolve_project_path(base_path)
+        };
+        Ok(resolved)
+    }
+
+    fn list_directory_suggestions(
+        &self,
+        query: &str,
+        project_path: Option<&PathBuf>,
+    ) -> Result<Vec<crate::relay::DirectorySuggestion>> {
+        let (raw_base, fragment) = Self::split_directory_query(query.trim());
+        let base_dir = self.resolve_directory_base(&raw_base, project_path)?;
+        if !base_dir.is_dir() {
+            return Ok(Vec::new());
+        }
+
+        let needle = fragment.to_lowercase();
+        let mut directories = Vec::new();
+        for entry in std::fs::read_dir(&base_dir)? {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => continue,
+            };
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(_) => continue,
+            };
+            if !file_type.is_dir() {
+                continue;
+            }
+            let name = match entry.file_name().into_string() {
+                Ok(name) => name,
+                Err(_) => continue,
+            };
+            if !needle.is_empty() && !name.to_lowercase().contains(&needle) {
+                continue;
+            }
+
+            let path = format!("{}{name}/", raw_base);
+            directories.push(crate::relay::DirectorySuggestion { path });
+        }
+
+        directories.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(directories)
+    }
+
     pub fn resolve_project_path(&self, path: PathBuf) -> PathBuf {
         if path.is_absolute() {
             return path;
@@ -173,6 +261,7 @@ impl SessionStateProvider for DaemonHandle {
         let terminals = self.terminal_manager.list();
         vec![SessionEvent::Snapshot {
             sessions,
+            rag_register_name: self.config.rag_register_name.clone(),
             projects,
             terminals,
         }]
@@ -603,6 +692,17 @@ impl crate::relay::WebSocketCommandHandler for DaemonHandle {
             }
             crate::relay::WebSocketCommand::CloseTerminal { terminal_id } => {
                 self.terminal_manager.close_terminal(&terminal_id).await?;
+            }
+            crate::relay::WebSocketCommand::ListDirectories {
+                thread_id,
+                session_id,
+                query,
+            } => {
+                let (_, _, project_path) = self.resolve_terminal_context(thread_id, session_id);
+                let directories = self.list_directory_suggestions(&query, project_path.as_ref())?;
+                self.session_event_sink
+                    .publish(SessionEvent::DirectorySuggestions { query, directories })
+                    .await;
             }
             crate::relay::WebSocketCommand::ListTerminals => {
                 let snapshot = self.get_snapshot().await;
@@ -1673,11 +1773,15 @@ pub async fn run_daemon(config: Config) -> Result<()> {
         let websocket_events = websocket_events.expect("websocket sink missing");
         let state_provider = daemon.clone() as Arc<dyn SessionStateProvider>;
         let command_handler = daemon.clone() as Arc<dyn crate::relay::WebSocketCommandHandler>;
-        if config.websocket_clipboard {
+        if config.websocket_clipboard && config.global_clipboard_intercept {
             crate::clipboard::spawn_watcher(
                 daemon.session_event_sink.clone(),
                 config.websocket_clipboard_poll_ms,
                 config.websocket_clipboard_max_bytes,
+            );
+        } else if config.websocket_clipboard {
+            tracing::info!(
+                "Global clipboard intercept disabled; websocket clipboard relay will only use non-global paths"
             );
         }
         if let Ok(addr) = bind_addr.parse::<std::net::SocketAddr>() {
@@ -1718,7 +1822,7 @@ pub async fn run_daemon(config: Config) -> Result<()> {
         });
     } else if config.rag_register_url.is_some() {
         tracing::warn!("RAG registration URL provided but websocket_bind is not set. RAG registration requires an active websocket server.");
-    } else if config.websocket_clipboard {
+    } else if config.websocket_clipboard && config.global_clipboard_intercept {
         tracing::warn!("Clipboard websocket relay is enabled but websocket_bind is not set.");
     }
 

@@ -55,6 +55,9 @@ enum Commands {
         /// WebSocket bind address (e.g. 0.0.0.0:9001)
         #[arg(long, env = "TELEGRAM_ACP_WEBSOCKET_BIND")]
         websocket_bind: Option<String>,
+        /// Enable global clipboard interception for websocket clipboard relay
+        #[arg(long, action = clap::ArgAction::SetTrue)]
+        global_clipboard_intercept: bool,
         /// Project root for listing projects
         #[arg(long, env = "TELEGRAM_ACP_PROJECT_ROOT")]
         project_root: Option<PathBuf>,
@@ -117,6 +120,7 @@ async fn main() -> anyhow::Result<()> {
             rag_register_name,
             rag_register_host,
             websocket_bind,
+            global_clipboard_intercept,
             project_root,
         } => {
             let mut config = config::Config::load()?;
@@ -134,6 +138,9 @@ async fn main() -> anyhow::Result<()> {
             }
             if websocket_bind.is_some() {
                 config.websocket_bind = websocket_bind;
+            }
+            if global_clipboard_intercept {
+                config.global_clipboard_intercept = true;
             }
             if project_root.is_some() {
                 config.project_root = project_root;

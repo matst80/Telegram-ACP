@@ -25,7 +25,7 @@ pub struct TerminalSpec {
 }
 
 pub struct TerminalManager {
-    terminals: DashMap<String, Arc<TerminalHandle>>,
+    terminals: Arc<DashMap<String, Arc<TerminalHandle>>>,
     event_sink: Arc<dyn SessionEventSink>,
     scrollback_limit: usize,
 }
@@ -57,7 +57,7 @@ enum InternalEvent {
 impl TerminalManager {
     pub fn new(event_sink: Arc<dyn SessionEventSink>) -> Self {
         Self {
-            terminals: DashMap::new(),
+            terminals: Arc::new(DashMap::new()),
             event_sink,
             scrollback_limit: DEFAULT_SCROLLBACK,
         }
@@ -239,10 +239,20 @@ impl TerminalManager {
         });
 
         let sink = Arc::clone(&self.event_sink);
+        let terminals = Arc::clone(&self.terminals);
         tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
+                let should_remove = matches!(event, InternalEvent::Exited(_));
                 if let Some(session_event) = handle.process_internal_event(event) {
                     sink.publish(session_event).await;
+                    if should_remove {
+                        terminals.remove(&handle.terminal_id);
+                        handle.closed.store(true, Ordering::SeqCst);
+                        sink.publish(SessionEvent::TerminalClosed {
+                            terminal_id: handle.terminal_id.clone(),
+                        })
+                        .await;
+                    }
                 }
             }
         });
