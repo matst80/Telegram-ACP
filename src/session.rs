@@ -18,6 +18,65 @@ enum PromptOutcome {
     Error(String),
 }
 
+fn summarize_stop_reason<T: serde::Serialize + std::fmt::Debug>(stop_reason: &T) -> String {
+    if let Ok(value) = serde_json::to_value(stop_reason) {
+        if let Some(reason) = extract_stop_reason_token(&value) {
+            return normalize_stop_reason_token(&reason);
+        }
+    }
+
+    normalize_stop_reason_token(&format!("{stop_reason:?}"))
+}
+
+fn extract_stop_reason_token(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(text) => Some(text.clone()),
+        serde_json::Value::Object(map) => {
+            for key in ["stopReason", "stop_reason", "reason", "type"] {
+                if let Some(found) = map.get(key).and_then(extract_stop_reason_token) {
+                    return Some(found);
+                }
+            }
+
+            map.values().find_map(extract_stop_reason_token)
+        }
+        serde_json::Value::Array(values) => values.iter().find_map(extract_stop_reason_token),
+        _ => None,
+    }
+}
+
+pub(crate) fn normalize_stop_reason_token(raw: &str) -> String {
+    let candidate = raw
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && *line != "```")
+        .next_back()
+        .unwrap_or("finished");
+
+    let token = candidate
+        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+        .find(|part| !part.is_empty())
+        .unwrap_or("finished");
+
+    let mut normalized = String::new();
+    for (index, ch) in token.chars().enumerate() {
+        if ch.is_ascii_uppercase() {
+            if index > 0 && !normalized.ends_with('_') {
+                normalized.push('_');
+            }
+            normalized.push(ch.to_ascii_lowercase());
+        } else {
+            normalized.push(ch.to_ascii_lowercase());
+        }
+    }
+
+    if normalized.is_empty() {
+        "finished".to_string()
+    } else {
+        normalized
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run_session_runtime(
     conn: Arc<acp::ClientSideConnection>,
@@ -330,7 +389,7 @@ async fn start_prompt(
                         sess_warn!("Failed to record prompt response: {err}");
                     }
                 }
-                PromptOutcome::Finished(format!("{:?}", resp.stop_reason))
+                PromptOutcome::Finished(summarize_stop_reason(&resp.stop_reason))
             }
             Err(e) => PromptOutcome::Error(format!("Agent error: {e}")),
         };
@@ -445,4 +504,29 @@ pub fn extract_text_from_content(content: &[acp::ContentBlock]) -> String {
         }
     }
     parts.join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::summarize_stop_reason;
+    use serde::Serialize;
+
+    #[derive(Debug, Serialize)]
+    struct FakeStopReason {
+        #[serde(rename = "stopReason")]
+        stop_reason: &'static str,
+    }
+
+    #[test]
+    fn summarize_stop_reason_prefers_structured_value() {
+        let raw = FakeStopReason {
+            stop_reason: "end_turn",
+        };
+        assert_eq!(summarize_stop_reason(&raw), "end_turn");
+    }
+
+    #[test]
+    fn summarize_stop_reason_handles_simple_variant() {
+        assert_eq!(summarize_stop_reason(&"Cancelled"), "cancelled");
+    }
 }

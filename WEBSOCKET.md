@@ -59,7 +59,25 @@ Sent immediately upon connection. Contains metadata and recent history for all a
         "Array of ACP AvailableCommand objects"
       ],
       "history": [
-        "Array of SessionEvent objects (see below)"
+        {
+          "type": "user_prompt",
+          "thread_id": 123,
+          "acp_session_id": "string | null",
+          "text": "string"
+        },
+        {
+          "type": "agent_update",
+          "thread_id": 123,
+          "acp_session_id": "string",
+          "event": {
+            "type": "update",
+            "sessionUpdate": "agent_message_chunk",
+            "content": {
+              "type": "text",
+              "text": "string"
+            }
+          }
+        }
       ]
     }
   ],
@@ -87,6 +105,7 @@ Sent immediately upon connection. Contains metadata and recent history for all a
 
 **Notes:**
 - `rag_register_name` is the daemon identity configured via `--rag-register-name` or `TELEGRAM_ACP_RAG_REGISTER_NAME`.
+- `history` is a JSON array of prior `SessionEvent` objects, using the same shapes clients receive live over the websocket.
 - `projects` is included when `project_root` is configured and the daemon can enumerate child directories.
 - `terminals` lists currently known PTY-backed terminals and is omitted when empty.
 - `available_commands` is omitted when empty.
@@ -105,18 +124,18 @@ Broadcast when the agent performs an action. This is the most complex and freque
   "acp_session_id": "string",
   "event": {
     "type": "working | update | finished | error",
-    "content": "string (only for finished/error)",
-    "update": {
-       "type": "agent_message_chunk | agent_thought_chunk | tool_call | tool_call_update | plan | available_commands_update | usage_update",
-       "content": { "text": "string" },
-       "title": "string (for tool_call)",
-       "tool_call_id": "string",
-       "status": "pending | in_progress | completed | failed",
-       "entries": ["..."]
-    }
+    "content": "string | { \"type\": \"text\", \"text\": \"string\" }",
+    "sessionUpdate": "agent_message_chunk | agent_thought_chunk | tool_call | tool_call_update | plan | available_commands_update | usage_update",
+    "title": "string (for tool_call)",
+    "tool_call_id": "string",
+    "status": "pending | in_progress | completed | failed",
+    "entries": ["..."],
+    "fields": { "status": "completed", "raw_output": "string" }
   }
 }
 ```
+
+For `event.type = "update"`, the `SessionUpdate` payload is flattened directly onto `event`. There is no nested `event.update` object. In that case, `content` is usually a structured content block such as `{ "type": "text", "text": "..." }`. For `finished` and `error`, `content` is a plain string.
 
 #### Detailed `agent_update.event` Variants:
 
@@ -133,9 +152,10 @@ Broadcast when the agent performs an action. This is the most complex and freque
   "acp_session_id": "...",
   "event": {
     "type": "update",
-    "session_update": {
-      "type": "agent_message_chunk",
-      "content": { "text": "The partial message..." }
+    "sessionUpdate": "agent_message_chunk",
+    "content": {
+      "type": "text",
+      "text": "The partial message..."
     }
   }
 }
@@ -149,14 +169,12 @@ Broadcast when the agent performs an action. This is the most complex and freque
   "acp_session_id": "...",
   "event": {
     "type": "update",
-    "session_update": {
-      "type": "tool_call",
-      "tool_call_id": "uuid-123",
-      "title": "Search Files",
-      "kind": "search",
-      "status": "in_progress",
-      "raw_input": "{\"query\": \"...\"}"
-    }
+    "sessionUpdate": "tool_call",
+    "tool_call_id": "uuid-123",
+    "title": "Search Files",
+    "kind": "search",
+    "status": "in_progress",
+    "raw_input": "{\"query\": \"...\"}"
   }
 }
 ```
@@ -169,13 +187,11 @@ Broadcast when the agent performs an action. This is the most complex and freque
   "acp_session_id": "...",
   "event": {
     "type": "update",
-    "session_update": {
-      "type": "tool_call_update",
-      "tool_call_id": "uuid-123",
-      "fields": {
-        "status": "completed",
-        "raw_output": "Search results..."
-      }
+    "sessionUpdate": "tool_call_update",
+    "tool_call_id": "uuid-123",
+    "fields": {
+      "status": "completed",
+      "raw_output": "Search results..."
     }
   }
 }
