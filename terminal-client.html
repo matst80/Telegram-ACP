@@ -125,7 +125,7 @@
         </label>
         <label>
             CWD
-            <input id="cwd" placeholder="optional">
+            <input id="cwd" placeholder="optional" list="cwd-suggestions" autocomplete="off">
         </label>
         <label>
             Command
@@ -139,6 +139,8 @@
         <button id="attach-btn" class="secondary">Reconnect</button>
         <button id="close-btn" class="danger">Close terminal</button>
     </div>
+
+    <datalist id="cwd-suggestions"></datalist>
 
     <div id="terminal"></div>
     <div id="log"></div>
@@ -157,6 +159,7 @@
         const cwdInput = document.getElementById('cwd');
         const commandInput = document.getElementById('command');
         const terminalIdInput = document.getElementById('terminal-id');
+        const cwdSuggestions = document.getElementById('cwd-suggestions');
         const statusDot = document.getElementById('status');
         const logEl = document.getElementById('log');
 
@@ -175,6 +178,7 @@
 
         let ws = null;
         let suppressResize = false;
+        let cwdLookupTimer = null;
 
         function log(message) {
             const line = document.createElement('div');
@@ -258,6 +262,37 @@
                 ws.close();
                 ws = null;
             }
+            renderDirectorySuggestions([]);
+        }
+
+        function renderDirectorySuggestions(directories) {
+            cwdSuggestions.innerHTML = '';
+            directories.forEach(directory => {
+                const option = document.createElement('option');
+                option.value = directory.path;
+                cwdSuggestions.appendChild(option);
+            });
+        }
+
+        function requestDirectorySuggestions() {
+            const query = cwdInput.value.trim();
+            if (!query) {
+                renderDirectorySuggestions([]);
+                return;
+            }
+            send({
+                type: 'list_directories',
+                thread_id: parseOptionalInt(threadIdInput.value),
+                session_id: sessionIdInput.value.trim() || undefined,
+                query
+            });
+        }
+
+        function scheduleDirectorySuggestions() {
+            if (cwdLookupTimer) {
+                clearTimeout(cwdLookupTimer);
+            }
+            cwdLookupTimer = window.setTimeout(requestDirectorySuggestions, 120);
         }
 
         function createTerminal() {
@@ -306,9 +341,25 @@
                     if (Array.isArray(message.terminals) && !terminalIdInput.value.trim() && message.terminals.length === 1) {
                         terminalIdInput.value = message.terminals[0].terminal_id;
                     }
-                    log(`Snapshot with ${message.terminals?.length || 0} terminal(s)`);
+                    if (Array.isArray(message.sessions) && !sessionIdInput.value.trim() && message.sessions.length === 1) {
+                        sessionIdInput.value = message.sessions[0].acp_session_id || '';
+                    }
+                    const agentNames = Array.isArray(message.sessions)
+                        ? message.sessions
+                            .map(session => session.agent_name || session.agent_command)
+                            .filter(Boolean)
+                        : [];
+                    const agentSuffix = agentNames.length ? `, agent(s): ${agentNames.join(', ')}` : '';
+                    const ragSuffix = message.rag_register_name ? `, rag name: ${message.rag_register_name}` : '';
+                    log(`Snapshot with ${message.sessions?.length || 0} session(s), ${message.terminals?.length || 0} terminal(s)${agentSuffix}${ragSuffix}`);
+                    if (cwdInput.value.trim()) {
+                        scheduleDirectorySuggestions();
+                    }
                     break;
                 }
+                case 'directory_suggestions':
+                    renderDirectorySuggestions(Array.isArray(message.directories) ? message.directories : []);
+                    break;
                 case 'terminal_created':
                     terminalIdInput.value = message.terminal.terminal_id;
                     log(`Created terminal ${message.terminal.terminal_id}`);
@@ -383,6 +434,8 @@
         createBtn.addEventListener('click', createTerminal);
         attachBtn.addEventListener('click', reconnectTerminal);
         closeBtn.addEventListener('click', closeTerminal);
+        cwdInput.addEventListener('input', scheduleDirectorySuggestions);
+        cwdInput.addEventListener('focus', scheduleDirectorySuggestions);
     </script>
 </body>
 </html>

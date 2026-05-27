@@ -30,6 +30,11 @@ pub struct TerminalInfo {
     pub exit_code: Option<i32>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DirectorySuggestion {
+    pub path: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionEvent {
@@ -130,8 +135,14 @@ pub enum SessionEvent {
         terminal_id: Option<String>,
         message: String,
     },
+    DirectorySuggestions {
+        query: String,
+        directories: Vec<DirectorySuggestion>,
+    },
     Snapshot {
         sessions: Vec<crate::types::SessionInfo>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rag_register_name: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         projects: Vec<ProjectInfo>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -261,6 +272,13 @@ pub enum WebSocketCommand {
     CloseTerminal {
         terminal_id: String,
     },
+    ListDirectories {
+        #[serde(default)]
+        thread_id: Option<i32>,
+        #[serde(default)]
+        session_id: Option<String>,
+        query: String,
+    },
     ListTerminals,
     ListSessions,
 }
@@ -381,6 +399,7 @@ impl SessionEventSink for BroadcastSessionEventSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{SessionInfo, SessionStatus};
     use tokio::sync::Mutex;
 
     struct MockEventSink {
@@ -532,9 +551,43 @@ mod tests {
     }
 
     #[test]
+    fn list_directories_deserialization() {
+        let json = r#"{
+            "type": "list_directories",
+            "thread_id": 7,
+            "query": "~/github.com/ma"
+        }"#;
+
+        let cmd: WebSocketCommand = serde_json::from_str(json).unwrap();
+        match cmd {
+            WebSocketCommand::ListDirectories {
+                thread_id,
+                session_id,
+                query,
+            } => {
+                assert_eq!(thread_id, Some(7));
+                assert_eq!(session_id, None);
+                assert_eq!(query, "~/github.com/ma");
+            }
+            _ => panic!("wrong command variant"),
+        }
+    }
+
+    #[test]
     fn snapshot_serializes_terminals() {
         let event = SessionEvent::Snapshot {
-            sessions: Vec::new(),
+            sessions: vec![SessionInfo {
+                acp_session_id: "session-1".to_string(),
+                project_path: std::path::PathBuf::from("/tmp/project"),
+                status: SessionStatus::Idle,
+                thread_id: Some(11),
+                name: Some("demo".to_string()),
+                agent_command: "copilot".to_string(),
+                agent_name: Some("copilot".to_string()),
+                available_commands: Vec::new(),
+                history: Vec::new(),
+            }],
+            rag_register_name: Some("acp-mac".to_string()),
             projects: Vec::new(),
             terminals: vec![TerminalInfo {
                 terminal_id: "term-1".to_string(),
@@ -551,7 +604,24 @@ mod tests {
 
         let json = serde_json::to_value(event).unwrap();
         assert_eq!(json["type"], "snapshot");
+        assert_eq!(json["sessions"][0]["agent_name"], "copilot");
+        assert_eq!(json["rag_register_name"], "acp-mac");
         assert_eq!(json["terminals"][0]["terminal_id"], "term-1");
         assert_eq!(json["terminals"][0]["cols"], 80);
+    }
+
+    #[test]
+    fn directory_suggestions_serializes_with_snake_case_tag() {
+        let event = SessionEvent::DirectorySuggestions {
+            query: "~/github.com/ma".to_string(),
+            directories: vec![DirectorySuggestion {
+                path: "~/github.com/matst80/".to_string(),
+            }],
+        };
+
+        let json = serde_json::to_value(event).unwrap();
+        assert_eq!(json["type"], "directory_suggestions");
+        assert_eq!(json["query"], "~/github.com/ma");
+        assert_eq!(json["directories"][0]["path"], "~/github.com/matst80/");
     }
 }

@@ -29,6 +29,7 @@ pub struct Config {
     pub agents: HashMap<String, String>,
     pub websocket_history_limit: usize,
     pub websocket_clipboard: bool,
+    pub global_clipboard_intercept: bool,
     pub websocket_clipboard_poll_ms: u64,
     pub websocket_clipboard_max_bytes: usize,
     pub mcp_servers: HashMap<String, FileMcpServerConfig>,
@@ -49,6 +50,7 @@ struct FileConfig {
     websocket_bind: Option<String>,
     websocket_history_limit: Option<usize>,
     websocket_clipboard: Option<bool>,
+    global_clipboard_intercept: Option<bool>,
     websocket_clipboard_poll_ms: Option<u64>,
     websocket_clipboard_max_bytes: Option<usize>,
     default_agent: Option<String>,
@@ -109,6 +111,14 @@ impl Config {
         )
         .map(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
         .unwrap_or(true);
+        let global_clipboard_intercept = env_or(
+            "TELEGRAM_ACP_GLOBAL_CLIPBOARD_INTERCEPT",
+            file_config
+                .global_clipboard_intercept
+                .map(|value| value.to_string()),
+        )
+        .map(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(default_global_clipboard_intercept());
         let websocket_clipboard_poll_ms = env_or(
             "TELEGRAM_ACP_WEBSOCKET_CLIPBOARD_POLL_MS",
             file_config.websocket_clipboard_poll_ms.map(|value| value.to_string()),
@@ -147,7 +157,11 @@ impl Config {
 
         let rag_register_url = env_or("TELEGRAM_ACP_RAG_REGISTER_URL", file_config.rag_register_url);
         let rag_token = env_or("TELEGRAM_ACP_RAG_TOKEN", file_config.rag_token);
-        let rag_register_name = env_or("TELEGRAM_ACP_RAG_REGISTER_NAME", file_config.rag_register_name);
+        let rag_register_name = env_or(
+            "TELEGRAM_ACP_RAG_REGISTER_NAME",
+            file_config.rag_register_name,
+        )
+        .or_else(current_hostname);
         let rag_register_host = env_or("TELEGRAM_ACP_RAG_REGISTER_HOST", file_config.rag_register_host);
         let project_root = env_or(
             "TELEGRAM_ACP_PROJECT_ROOT",
@@ -168,6 +182,7 @@ impl Config {
             agents,
             websocket_history_limit,
             websocket_clipboard,
+            global_clipboard_intercept,
             websocket_clipboard_poll_ms,
             websocket_clipboard_max_bytes,
             mcp_servers,
@@ -210,6 +225,38 @@ fn dirs_config_path() -> PathBuf {
 
 fn env_or(key: &str, fallback: Option<String>) -> Option<String> {
     std::env::var(key).ok().or(fallback)
+}
+
+#[cfg(target_os = "macos")]
+fn default_global_clipboard_intercept() -> bool {
+    false
+}
+
+#[cfg(not(target_os = "macos"))]
+fn default_global_clipboard_intercept() -> bool {
+    true
+}
+
+fn current_hostname() -> Option<String> {
+    if let Ok(hostname) = std::env::var("HOSTNAME") {
+        let trimmed = hostname.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    let output = std::process::Command::new("hostname").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let hostname = String::from_utf8_lossy(&output.stdout);
+    let trimmed = hostname.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 fn parse_agents(extra_tables: &HashMap<String, toml::Table>) -> HashMap<String, String> {
@@ -294,5 +341,27 @@ mod tests {
         let mysse = mcp_servers.get("mysse").unwrap();
         assert_eq!(mysse.r#type.as_deref(), Some("sse"));
         assert_eq!(mysse.url.as_deref(), Some("https://example.com/sse"));
+    }
+
+    #[test]
+    fn current_hostname_prefers_hostname_env() {
+        std::env::set_var("HOSTNAME", "host-from-env");
+
+        let hostname = current_hostname();
+
+        std::env::remove_var("HOSTNAME");
+        assert_eq!(hostname.as_deref(), Some("host-from-env"));
+    }
+
+    #[test]
+    fn global_clipboard_intercept_env_parses_true() {
+        std::env::set_var("TELEGRAM_ACP_GLOBAL_CLIPBOARD_INTERCEPT", "true");
+
+        let enabled = env_or("TELEGRAM_ACP_GLOBAL_CLIPBOARD_INTERCEPT", None)
+            .map(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(default_global_clipboard_intercept());
+
+        std::env::remove_var("TELEGRAM_ACP_GLOBAL_CLIPBOARD_INTERCEPT");
+        assert!(enabled);
     }
 }
