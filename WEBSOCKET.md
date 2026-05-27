@@ -19,12 +19,18 @@ All messages sent by the server are JSON objects with a `type` field at the top 
 | `user_prompt` | User sent a prompt to an agent | Server -> Client |
 | `agent_update` | Agent activity (thinking, typing, tool calls) | Server -> Client |
 | `clipboard_updated` | Local system clipboard changed | Server -> Client |
+| `terminal_created` | A terminal was created | Server -> Client |
+| `terminal_output` | Terminal emitted output bytes | Server -> Client |
+| `terminal_snapshot` | Full terminal screen snapshot | Server -> Client |
+| `terminal_exited` | Terminal process exited | Server -> Client |
+| `terminal_closed` | Terminal was removed from the daemon | Server -> Client |
 | `session_switched` | Active session in a topic was changed | Server -> Client |
 | `session_ended` | Agent session terminated | Server -> Client |
 | `session_removed` | Agent session and topic removed | Server -> Client |
 | `send_prompt` | Send a command to the agent | Client -> Server |
 | `cancel` | Interrupt current agent task | Client -> Server |
 | `create_terminal` | Spawn a PTY-backed terminal process | Client -> Server |
+| `close_terminal` | Terminate and remove a terminal | Client -> Server |
 
 ---
 
@@ -208,7 +214,7 @@ This event is daemon-scoped, not session-scoped: it does not include `thread_id`
 - `truncated`: `true` when the clipboard content exceeded the configured byte limit and was cut before sending.
 
 **Notes:**
-- This event is only emitted when clipboard relay is explicitly enabled.
+- This event is emitted whenever clipboard relay is enabled. Clipboard relay is on by default when the websocket server is enabled unless `websocket_clipboard` is set to `false`.
 - Clipboard updates are not included in per-session history; they are broadcast live to connected websocket clients.
 - The first observed clipboard value after the watcher starts is sent as a `clipboard_updated` event.
 
@@ -225,6 +231,84 @@ Broadcast when a session begins, is resumed, terminates, or is removed.
   "acp_session_id": "string | null"
 }
 ```
+
+---
+
+### 6. `terminal_created`
+Broadcast after a new PTY-backed terminal has been created.
+
+**Structure:**
+```json
+{
+  "type": "terminal_created",
+  "terminal": {
+    "terminal_id": "string",
+    "thread_id": "number | null",
+    "session_id": "string | null",
+    "cwd": "string",
+    "command": ["string", "..."],
+    "cols": "number",
+    "rows": "number",
+    "running": "boolean",
+    "exit_code": "number | null"
+  }
+}
+```
+
+### 7. `terminal_output`
+Broadcast when terminal output arrives. `data` is base64-encoded raw output bytes.
+
+**Structure:**
+```json
+{
+  "type": "terminal_output",
+  "terminal_id": "string",
+  "sequence": "number",
+  "data": "base64-string"
+}
+```
+
+### 8. `terminal_snapshot`
+Broadcast as a full-screen terminal snapshot. `data` is base64-encoded formatted screen state.
+
+**Structure:**
+```json
+{
+  "type": "terminal_snapshot",
+  "terminal_id": "string",
+  "sequence": "number",
+  "cols": "number",
+  "rows": "number",
+  "cursor_row": "number",
+  "cursor_col": "number",
+  "data": "base64-string",
+  "running": "boolean"
+}
+```
+
+### 9. `terminal_exited` / `terminal_closed`
+Broadcast when a terminal process exits and when the daemon removes that terminal.
+
+**Structure:**
+```json
+{
+  "type": "terminal_exited",
+  "terminal_id": "string",
+  "exit_code": "number | null"
+}
+```
+
+```json
+{
+  "type": "terminal_closed",
+  "terminal_id": "string"
+}
+```
+
+**Behavior:**
+- If a terminal is explicitly terminated via `close_terminal`, the daemon kills it and emits `terminal_closed`.
+- If a terminal exits or is killed outside the app, the daemon emits `terminal_exited` and then automatically removes it, followed by `terminal_closed`.
+- After automatic removal, that terminal no longer appears in later `snapshot` payloads.
 
 ---
 
@@ -276,6 +360,7 @@ Create a new PTY-backed terminal owned by the daemon.
 - If there is no associated project path, it falls back to `project_root` when configured, otherwise the daemon's current working directory.
 - If the resolved `cwd` does not exist or is not a directory, the command fails.
 - On success, the server emits `terminal_created`, followed by `terminal_snapshot`, and then streams `terminal_output` events as data arrives.
+- If the terminal later exits on its own, the server emits `terminal_exited` and then `terminal_closed`.
 
 **Example:**
 ```json
@@ -286,6 +371,17 @@ Create a new PTY-backed terminal owned by the daemon.
   "rows": 36,
   "cwd": ".",
   "command": ["zsh"]
+}
+```
+
+### 4. `close_terminal`
+Terminate and remove an existing terminal.
+
+**Structure:**
+```json
+{
+  "type": "close_terminal",
+  "terminal_id": "string"
 }
 ```
 
