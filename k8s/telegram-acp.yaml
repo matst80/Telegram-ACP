@@ -4,17 +4,6 @@ metadata:
   name: dev
 ---
 apiVersion: v1
-kind: Secret
-metadata:
-  name: telegram-acp-secret
-  namespace: dev
-type: Opaque
-stringData:
-  bot-token: ""
-  chat-id: "366436544"
-  rag-token: ""
----
-apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: telegram-acp-root-pvc
@@ -112,6 +101,10 @@ spec:
               echo "Starting telegram-acp daemon..."
               exec /usr/local/bin/telegram-acp-entrypoint telegram-acp daemon
           env:
+            - name: LANG
+              value: "C.UTF-8"
+            - name: LC_ALL
+              value: "C.UTF-8"
             - name: TELEGRAM_ACP_BOT_TOKEN
               valueFrom:
                 secretKeyRef:
