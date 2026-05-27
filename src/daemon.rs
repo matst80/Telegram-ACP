@@ -163,6 +163,30 @@ impl DaemonHandle {
         Ok(directories)
     }
 
+    fn sanitize_history_event(event: SessionEvent) -> SessionEvent {
+        match event {
+            SessionEvent::AgentUpdate {
+                thread_id,
+                acp_session_id,
+                event: AgentEvent::Finished { content },
+            } => SessionEvent::AgentUpdate {
+                thread_id,
+                acp_session_id,
+                event: AgentEvent::Finished {
+                    content: crate::session::normalize_stop_reason_token(&content),
+                },
+            },
+            other => other,
+        }
+    }
+
+    fn sanitize_history(events: Vec<SessionEvent>) -> Vec<SessionEvent> {
+        events
+            .into_iter()
+            .map(Self::sanitize_history_event)
+            .collect()
+    }
+
     pub fn resolve_project_path(&self, path: PathBuf) -> PathBuf {
         if path.is_absolute() {
             return path;
@@ -232,7 +256,9 @@ impl SessionStateProvider for DaemonHandle {
             let topic = entry.value();
             if let Some(active) = &topic.active {
                 let status = *active.status.lock().await;
-                let history = active.history.lock().await.iter().cloned().collect();
+                let history = Self::sanitize_history(
+                    active.history.lock().await.iter().cloned().collect(),
+                );
                 let acp_session_id = active.acp_session_id.clone().unwrap_or_default();
                 let name = active.name.lock().await.clone();
                 let available_commands = active.available_commands.lock().await.clone();
@@ -1059,7 +1085,7 @@ impl DaemonHandle {
         // Seed initial history
         {
             let mut h = history.lock().await;
-            for event in initial_history {
+            for event in Self::sanitize_history(initial_history) {
                 h.push_back(event);
             }
         }
