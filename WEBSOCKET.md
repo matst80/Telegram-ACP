@@ -1,51 +1,72 @@
 # Telegram-ACP WebSocket API
 
-The Telegram-ACP daemon provides a WebSocket server for real-time monitoring of agent sessions. It broadcasts events about user interactions and agent responses.
+The Telegram-ACP daemon provides a WebSocket server for real-time monitoring and control of agent sessions. It broadcasts session and terminal events, and it accepts JSON commands for session management, terminal I/O, and lightweight project browsing.
 
 ## Connection
 
-- **Default Port:** 8000 (configurable via `websocket_bind`)
+- **Default Port:** `8000` (configurable via `websocket_bind`)
 - **Protocol:** JSON over WebSocket
-- **Discovery:** The service advertises itself via mDNS (Bonjour/Zeroconf) as `_acp-ws._tcp.local.`.
+- **Discovery:** The service advertises itself via mDNS (Bonjour/Zeroconf) as `_acp-ws._tcp.local.`
+- **Authentication:** Optional bearer-token auth. If `ACP_WS_TOKEN` or `TELEGRAM_ACP_WS_TOKEN` is set, clients must send `Authorization: Bearer <token>` or `?token=<token>` in the connection URL.
 
 ## Message Structure Overview
 
-All messages sent by the server are JSON objects with a `type` field at the top level.
+All websocket packets are JSON objects with a top-level `type` field.
 
 | Message Type | Description | Direction |
 | :--- | :--- | :--- |
-| `snapshot` | Initial state of all sessions | Server -> Client |
-| `session_started` | A new session was created | Server -> Client |
-| `user_prompt` | User sent a prompt to an agent | Server -> Client |
-| `agent_update` | Agent activity (thinking, typing, tool calls) | Server -> Client |
+| `snapshot` | Full current daemon/session snapshot | Server -> Client |
+| `user_prompt` | User prompt recorded for a session | Server -> Client |
+| `agent_update` | Agent activity, streamed content, tool calls, completion, errors | Server -> Client |
+| `session_started` | A session became active in a topic | Server -> Client |
+| `session_switched` | The active session in a topic changed | Server -> Client |
+| `session_ended` | A session terminated | Server -> Client |
+| `session_removed` | A headless session/topic entry was removed | Server -> Client |
+| `permission_request` | ACP permission request awaiting a decision | Server -> Client |
+| `telegram_thread_bound` | A session was bound to a Telegram topic | Server -> Client |
+| `error` | Daemon-side validation or command error event | Server -> Client |
+| `session_renamed` | Session/topic display name changed | Server -> Client |
+| `topic_removed` | Topic entry removed from the daemon | Server -> Client |
 | `clipboard_updated` | Local system clipboard changed | Server -> Client |
-| `terminal_created` | A terminal was created | Server -> Client |
+| `terminal_created` | A PTY-backed terminal was created | Server -> Client |
+| `terminal_attached` | A client attached to an existing terminal | Server -> Client |
 | `terminal_output` | Terminal emitted output bytes | Server -> Client |
 | `terminal_snapshot` | Full terminal screen snapshot | Server -> Client |
+| `terminal_resized` | Terminal dimensions changed | Server -> Client |
 | `terminal_exited` | Terminal process exited | Server -> Client |
 | `terminal_closed` | Terminal was removed from the daemon | Server -> Client |
-| `directory_suggestions` | Directory typeahead suggestions for path inputs | Server -> Client |
-| `find_files_result` | File search suggestions with scoring | Server -> Client |
+| `terminal_error` | Terminal runtime error | Server -> Client |
+| `directory_suggestions` | Directory typeahead suggestions | Server -> Client |
+| `find_files_result` | Fuzzy file search results | Server -> Client |
 | `read_file_result` | Slice of file contents | Server -> Client |
-| `session_switched` | Active session in a topic was changed | Server -> Client |
-| `session_ended` | Agent session terminated | Server -> Client |
-| `session_removed` | Agent session and topic removed | Server -> Client |
-| `send_prompt` | Send a command to the agent | Client -> Server |
-| `cancel` | Interrupt current agent task | Client -> Server |
-| `create_terminal` | Spawn a PTY-backed terminal process | Client -> Server |
+| `send_prompt` | Send a prompt to a session | Client -> Server |
+| `cancel` | Interrupt current session work | Client -> Server |
+| `set_config_option` | Change a session config option | Client -> Server |
+| `set_permission_mode` | Change a session permission mode | Client -> Server |
+| `spawn_session` | Start a new session (alias: `spawn`) | Client -> Server |
+| `end_session` | End a session | Client -> Server |
+| `permission_response` | Reply to a `permission_request` | Client -> Server |
+| `bind_telegram_thread` | Bind a session to a Telegram topic | Client -> Server |
+| `rename_session` | Rename a topic/session | Client -> Server |
+| `remove_topic` | Remove a topic entry | Client -> Server |
+| `execute_command` | Run an ACP available command | Client -> Server |
+| `create_terminal` | Spawn a PTY-backed terminal | Client -> Server |
+| `attach_terminal` | Attach to an existing terminal | Client -> Server |
+| `terminal_input` | Send base64-encoded input bytes to a terminal | Client -> Server |
+| `terminal_resize` | Resize a terminal | Client -> Server |
 | `close_terminal` | Terminate and remove a terminal | Client -> Server |
-| `list_directories` | Request directory suggestions for typeahead | Client -> Server |
-| `find_files` | Request fuzzy file search results (top 50) | Client -> Server |
-| `read_file` | Read slice of file contents (default 400 lines) | Client -> Server |
-
-
+| `list_directories` | Request directory suggestions | Client -> Server |
+| `find_files` | Request fuzzy file search results | Client -> Server |
+| `read_file` | Read a file slice | Client -> Server |
+| `list_terminals` | Request a fresh snapshot of sessions and terminals | Client -> Server |
+| `list_sessions` | Request a fresh snapshot of sessions and terminals | Client -> Server |
 
 ---
 
 ## Server -> Client Messages
 
 ### 1. `snapshot`
-Sent immediately upon connection. Contains metadata and recent history for all active topics.
+Sent immediately after the websocket connection is established. The same payload is also rebroadcast when the client sends `list_sessions` or `list_terminals`.
 
 **Structure:**
 ```json
@@ -69,20 +90,13 @@ Sent immediately upon connection. Contains metadata and recent history for all a
           "type": "user_prompt",
           "thread_id": 123,
           "acp_session_id": "string | null",
-          "text": "string"
-        },
-        {
-          "type": "agent_update",
-          "thread_id": 123,
-          "acp_session_id": "string",
-          "event": {
-            "type": "update",
-            "sessionUpdate": "agent_message_chunk",
-            "content": {
+          "text": "string",
+          "content": [
+            {
               "type": "text",
               "text": "string"
             }
-          }
+          ]
         }
       ]
     }
@@ -111,51 +125,52 @@ Sent immediately upon connection. Contains metadata and recent history for all a
 
 **Notes:**
 - `rag_register_name` is the daemon identity configured via `--rag-register-name` or `TELEGRAM_ACP_RAG_REGISTER_NAME`.
-- `history` is a JSON array of prior `SessionEvent` objects, using the same shapes clients receive live over the websocket.
-- `projects` is included when `project_root` is configured and the daemon can enumerate child directories.
-- `terminals` lists currently known PTY-backed terminals and is omitted when empty.
-- `available_commands` is omitted when empty.
-- `agent_name` is the configured ACP alias for the session, such as `claude`, `codex`, or `copilot`.
-
----
+- `history` uses the same `SessionEvent` packet shapes that are broadcast live over the websocket.
+- `available_commands`, `projects`, and `terminals` are omitted when empty.
+- `agent_name` is the configured ACP alias for the session, for example `claude`, `codex`, or `copilot`.
 
 ### 2. `agent_update`
-Broadcast when the agent performs an action. This is the most complex and frequent message.
+Broadcast when the agent emits activity for a session.
 
 **Structure:**
 ```json
 {
   "type": "agent_update",
-  "thread_id": "number",
+  "thread_id": "number | null",
   "acp_session_id": "string",
   "event": {
     "type": "working | update | finished | error",
     "content": "string | { \"type\": \"text\", \"text\": \"string\" }",
     "sessionUpdate": "agent_message_chunk | agent_thought_chunk | tool_call | tool_call_update | plan | available_commands_update | usage_update",
-    "title": "string (for tool_call)",
-    "tool_call_id": "string",
+    "title": "string",
+    "toolCallId": "string",
     "status": "pending | in_progress | completed | failed",
     "entries": ["..."],
-    "fields": { "status": "completed", "raw_output": "string" }
+    "fields": {}
   }
 }
 ```
 
-For `event.type = "update"`, the `SessionUpdate` payload is flattened directly onto `event`. There is no nested `event.update` object. In that case, `content` is usually a structured content block such as `{ "type": "text", "text": "..." }`. For `finished` and `error`, `content` is a plain string.
+For `event.type = "update"`, the ACP `SessionUpdate` payload is flattened directly onto `event`. There is no nested `event.update` object. For `finished` and `error`, `content` is a plain string.
 
-#### Detailed `agent_update.event` Variants:
+**Examples:**
 
-**A. Agent is thinking:**
-```json
-{ "type": "agent_update", "thread_id": 1, "acp_session_id": "...", "event": { "type": "working" } }
-```
-
-**B. Streaming text chunk:**
+Agent working:
 ```json
 {
   "type": "agent_update",
   "thread_id": 1,
-  "acp_session_id": "...",
+  "acp_session_id": "session-1",
+  "event": { "type": "working" }
+}
+```
+
+Streaming text chunk:
+```json
+{
+  "type": "agent_update",
+  "thread_id": 1,
+  "acp_session_id": "session-1",
   "event": {
     "type": "update",
     "sessionUpdate": "agent_message_chunk",
@@ -167,63 +182,151 @@ For `event.type = "update"`, the `SessionUpdate` payload is flattened directly o
 }
 ```
 
-**C. Tool Call started:**
+Tool call started:
 ```json
 {
   "type": "agent_update",
   "thread_id": 1,
-  "acp_session_id": "...",
+  "acp_session_id": "session-1",
   "event": {
     "type": "update",
     "sessionUpdate": "tool_call",
-    "tool_call_id": "uuid-123",
+    "toolCallId": "uuid-123",
     "title": "Search Files",
     "kind": "search",
-    "status": "in_progress",
-    "raw_input": "{\"query\": \"...\"}"
+    "status": "in_progress"
   }
 }
 ```
-
-**D. Tool Call result (update):**
-```json
-{
-  "type": "agent_update",
-  "thread_id": 1,
-  "acp_session_id": "...",
-  "event": {
-    "type": "update",
-    "sessionUpdate": "tool_call_update",
-    "tool_call_id": "uuid-123",
-    "fields": {
-      "status": "completed",
-      "raw_output": "Search results..."
-    }
-  }
-}
-```
-
----
 
 ### 3. `user_prompt`
-Broadcast when a user sends a message via Telegram.
+Broadcast when a user prompt is recorded for a session.
 
 **Structure:**
 ```json
 {
   "type": "user_prompt",
-  "thread_id": "number",
+  "thread_id": "number | null",
   "acp_session_id": "string | null",
-  "text": "string"
+  "text": "string",
+  "content": [
+    {
+      "type": "text",
+      "text": "string"
+    }
+  ]
 }
 ```
 
----
+**Notes:**
+- `content` is omitted when empty.
+- For websocket-originated prompts, the daemon currently emits both `text` and a single text content block.
 
-### 4. `clipboard_updated`
+### 4. `session_started` and `session_switched`
+Broadcast when a session becomes active in a topic or the active session changes.
+
+**Structure:**
+```json
+{
+  "type": "session_started | session_switched",
+  "thread_id": "number | null",
+  "acp_session_id": "string",
+  "name": "string | null",
+  "agent_name": "string | null",
+  "agent_command": "string",
+  "project_path": "string"
+}
+```
+
+### 5. `session_ended` and `session_removed`
+Broadcast when a session terminates or when a topic/session entry is removed.
+
+**Structure:**
+```json
+{
+  "type": "session_ended",
+  "thread_id": "number | null",
+  "acp_session_id": "string | null"
+}
+```
+
+```json
+{
+  "type": "session_removed",
+  "thread_id": "number"
+}
+```
+
+### 6. `permission_request`
+Broadcast when the ACP client asks the daemon to resolve a permission prompt.
+
+**Structure:**
+```json
+{
+  "type": "permission_request",
+  "thread_id": "number | null",
+  "acp_session_id": "string",
+  "tool": "string",
+  "args": {},
+  "request_id": "string"
+}
+```
+
+The client replies with `permission_response`.
+
+### 7. `telegram_thread_bound`
+Broadcast after binding a session to a Telegram topic, either by reusing an existing thread or by creating a new one.
+
+**Structure:**
+```json
+{
+  "type": "telegram_thread_bound",
+  "session_id": "string",
+  "thread_id": "number",
+  "name": "string",
+  "created": "boolean"
+}
+```
+
+### 8. `error`
+Broadcast for daemon-side validation or command handling errors that are intentionally surfaced as events.
+
+**Structure:**
+```json
+{
+  "type": "error",
+  "in_reply_to": "string | null",
+  "session_id": "string | null",
+  "code": "string",
+  "message": "string"
+}
+```
+
+Examples include validation failures for `bind_telegram_thread`.
+
+### 9. `session_renamed` and `topic_removed`
+
+**Structure:**
+```json
+{
+  "type": "session_renamed",
+  "thread_id": "number",
+  "acp_session_id": "string",
+  "name": "string"
+}
+```
+
+```json
+{
+  "type": "topic_removed",
+  "thread_id": "number"
+}
+```
+
+### 10. `clipboard_updated`
 Broadcast when the daemon's optional clipboard watcher detects that the local system clipboard content has changed.
 
-This event is daemon-scoped, not session-scoped: it does not include `thread_id` or `acp_session_id`.
+This event is daemon-scoped, not session-scoped.
 
 **Structure:**
 ```json
@@ -235,35 +338,11 @@ This event is daemon-scoped, not session-scoped: it does not include `thread_id`
 }
 ```
 
-**Fields:**
-- `source`: The clipboard backend used on the host machine.
-- `content`: Clipboard text content. This is emitted as UTF-8 text; non-UTF-8 bytes are lossy-decoded.
-- `truncated`: `true` when the clipboard content exceeded the configured byte limit and was cut before sending.
-
 **Notes:**
-- This event is emitted whenever clipboard relay is enabled. Clipboard relay is on by default when the websocket server is enabled unless `websocket_clipboard` is set to `false`.
-- Clipboard updates are not included in per-session history; they are broadcast live to connected websocket clients.
-- The first observed clipboard value after the watcher starts is sent as a `clipboard_updated` event.
+- Clipboard updates are broadcast live and are not stored in per-session history.
+- The first observed clipboard value after the watcher starts is also emitted.
 
----
-
-### 5. `session_started` / `session_switched` / `session_ended` / `session_removed`
-Broadcast when a session begins, is resumed, terminates, or is removed.
-
-**Structure:**
-```json
-{
-  "type": "session_started | session_switched | session_ended | session_removed",
-  "thread_id": "number",
-  "acp_session_id": "string | null",
-  "folder": "string (for session_started/session_switched)",
-  "name": "string | null (for session_started/session_switched)"
-}
-```
-
----
-
-### 6. `terminal_created`
+### 11. `terminal_created`
 Broadcast after a new PTY-backed terminal has been created.
 
 **Structure:**
@@ -284,7 +363,22 @@ Broadcast after a new PTY-backed terminal has been created.
 }
 ```
 
-### 7. `terminal_output`
+### 12. `terminal_attached`
+Broadcast after a client attaches to an existing terminal.
+
+**Structure:**
+```json
+{
+  "type": "terminal_attached",
+  "terminal_id": "string",
+  "cols": "number",
+  "rows": "number"
+}
+```
+
+The daemon also emits a fresh `terminal_snapshot` immediately after attach succeeds.
+
+### 13. `terminal_output`
 Broadcast when terminal output arrives. `data` is base64-encoded raw output bytes.
 
 **Structure:**
@@ -297,7 +391,7 @@ Broadcast when terminal output arrives. `data` is base64-encoded raw output byte
 }
 ```
 
-### 8. `terminal_snapshot`
+### 14. `terminal_snapshot`
 Broadcast as a full-screen terminal snapshot. `data` is base64-encoded formatted screen state.
 
 **Structure:**
@@ -315,8 +409,20 @@ Broadcast as a full-screen terminal snapshot. `data` is base64-encoded formatted
 }
 ```
 
-### 9. `terminal_exited` / `terminal_closed`
-Broadcast when a terminal process exits and when the daemon removes that terminal.
+### 15. `terminal_resized`
+Broadcast when a terminal is resized.
+
+**Structure:**
+```json
+{
+  "type": "terminal_resized",
+  "terminal_id": "string",
+  "cols": "number",
+  "rows": "number"
+}
+```
+
+### 16. `terminal_exited`, `terminal_closed`, and `terminal_error`
 
 **Structure:**
 ```json
@@ -334,13 +440,21 @@ Broadcast when a terminal process exits and when the daemon removes that termina
 }
 ```
 
-**Behavior:**
-- If a terminal is explicitly terminated via `close_terminal`, the daemon kills it and emits `terminal_closed`.
-- If a terminal exits or is killed outside the app, the daemon emits `terminal_exited` and then automatically removes it, followed by `terminal_closed`.
-- After automatic removal, that terminal no longer appears in later `snapshot` payloads.
+```json
+{
+  "type": "terminal_error",
+  "terminal_id": "string | null",
+  "message": "string"
+}
+```
 
-### 10. `directory_suggestions`
-Broadcast in response to `list_directories`. This is intended for path input typeahead, for example resolving `~/` to directories under the caller's home directory.
+**Behavior:**
+- If a terminal is explicitly terminated via `close_terminal`, the daemon emits `terminal_closed`.
+- If a terminal exits on its own, the daemon emits `terminal_exited` and then `terminal_closed`.
+- `terminal_error` is emitted for PTY/runtime failures and may include a `terminal_id` when the failing terminal is known.
+
+### 17. `directory_suggestions`
+Broadcast in response to `list_directories`.
 
 **Structure:**
 ```json
@@ -357,12 +471,11 @@ Broadcast in response to `list_directories`. This is intended for path input typ
 
 **Behavior:**
 - Only directories are returned.
-- Suggestions preserve the caller's path style. For example, `~/github.com/ma` returns values like `~/github.com/matst80/`.
-- Matching is case-insensitive and uses substring matching on the final path segment.
-- Relative paths are resolved against the associated session project when `thread_id` or `session_id` is supplied.
+- Suggestions preserve the caller's path style, for example `~/github.com/ma` can return `~/github.com/matst80/`.
+- Relative paths are resolved against the associated project when `thread_id` or `session_id` is supplied.
 
-### 11. `find_files_result`
-Broadcast in response to `find_files`. Returns the top 50 scored files matching the fuzzy query.
+### 18. `find_files_result`
+Broadcast in response to `find_files`.
 
 **Structure:**
 ```json
@@ -376,11 +489,11 @@ Broadcast in response to `find_files`. Returns the top 50 scored files matching 
 ```
 
 **Behavior:**
-- Up to 50 paths are returned, ordered by relevance match score (highest score first).
-- Matches are resolved relative to the associated project path.
+- Up to 50 paths are returned, ordered by relevance.
+- Matching is resolved relative to the associated project path.
 
-### 12. `read_file_result`
-Broadcast in response to `read_file`. Returns a slice of the requested file's lines.
+### 19. `read_file_result`
+Broadcast in response to `read_file`.
 
 **Structure:**
 ```json
@@ -395,39 +508,158 @@ Broadcast in response to `read_file`. Returns a slice of the requested file's li
 ```
 
 **Fields:**
-- `path`: The path of the file that was read.
-- `content`: Sliced string content of the requested lines.
+- `path`: The path that was read.
+- `content`: The returned line slice.
 - `start_line`: The 1-based start line of the returned slice.
-- `line_count`: The maximum number of lines requested or returned.
-- `total_lines`: The total number of lines present in the file.
+- `line_count`: The requested or returned slice length.
+- `total_lines`: Total line count in the file.
 
 ---
 
-
-
 ## Client -> Server Commands
+
+Commands that act on an existing session usually accept `thread_id`, `session_id`, or both. When both are omitted, the daemon cannot resolve the target session.
 
 ### 1. `send_prompt`
 ```json
 {
   "type": "send_prompt",
-  "thread_id": "number",
+  "thread_id": "number | null",
+  "session_id": "string | null",
   "text": "string"
 }
 ```
+
+The daemon records a matching `user_prompt` event before forwarding the prompt to the session.
 
 ### 2. `cancel`
 ```json
 {
   "type": "cancel",
+  "thread_id": "number | null",
+  "session_id": "string | null"
+}
+```
+
+### 3. `set_config_option`
+Change an ACP session config option.
+
+```json
+{
+  "type": "set_config_option",
+  "thread_id": "number | null",
+  "session_id": "string | null",
+  "config_id": "string",
+  "value_id": "string"
+}
+```
+
+### 4. `set_permission_mode`
+Change the ACP permission mode for a session.
+
+```json
+{
+  "type": "set_permission_mode",
+  "thread_id": "number | null",
+  "session_id": "string | null",
+  "mode_id": "string"
+}
+```
+
+### 5. `spawn_session`
+Start a new session. The daemon also accepts `spawn` as an alias for the packet `type`.
+
+```json
+{
+  "type": "spawn_session",
+  "project_path": "string",
+  "agent_command": "string | null",
+  "thread_id": "number | null"
+}
+```
+
+**Notes:**
+- `agent_command` also accepts the legacy field name `agent`.
+- If `thread_id` is omitted, the daemon creates a headless session with an internal negative thread id.
+
+### 6. `end_session`
+```json
+{
+  "type": "end_session",
+  "session_id": "string | null",
+  "thread_id": "number | null"
+}
+```
+
+If the session is headless, ending it can also emit `session_removed`.
+
+### 7. `permission_response`
+Reply to a pending `permission_request`.
+
+```json
+{
+  "type": "permission_response",
+  "request_id": "string",
+  "decision": "string"
+}
+```
+
+`decision` is sent back to ACP as the selected permission option id.
+
+### 8. `bind_telegram_thread`
+Bind an active session to a Telegram thread.
+
+```json
+{
+  "type": "bind_telegram_thread",
+  "session_id": "string",
+  "thread_id": "number | null",
+  "name": "string | null"
+}
+```
+
+**Behavior:**
+- If `thread_id` is a positive Telegram topic id, the session is rebound to that thread.
+- If `thread_id` is omitted or non-positive, the daemon creates a new Telegram topic.
+- When creating a topic, `name` is expected. If it is missing, the daemon currently falls back to a derived project name for migration compatibility.
+- Validation failures are emitted as `error` events with `in_reply_to = "bind_telegram_thread"`.
+
+### 9. `rename_session`
+```json
+{
+  "type": "rename_session",
+  "thread_id": "number | null",
+  "session_id": "string | null",
+  "name": "string"
+}
+```
+
+On success the daemon emits `session_renamed` and, for real Telegram topics, also renames the forum topic remotely.
+
+### 10. `remove_topic`
+```json
+{
+  "type": "remove_topic",
   "thread_id": "number"
 }
 ```
 
-### 3. `create_terminal`
+### 11. `execute_command`
+Execute one ACP available command for a session.
+
+```json
+{
+  "type": "execute_command",
+  "thread_id": "number | null",
+  "session_id": "string | null",
+  "command_id": "string",
+  "arguments": {}
+}
+```
+
+### 12. `create_terminal`
 Create a new PTY-backed terminal owned by the daemon.
 
-**Structure:**
 ```json
 {
   "type": "create_terminal",
@@ -440,37 +672,52 @@ Create a new PTY-backed terminal owned by the daemon.
 }
 ```
 
-**Fields:**
-- `thread_id`: Optional Telegram thread id to associate with the terminal.
-- `session_id`: Optional ACP session id to associate with the terminal. If `thread_id` is omitted, the daemon can use this to resolve the related session context.
-- `cols`: Initial terminal width in columns. Must be greater than `0`.
-- `rows`: Initial terminal height in rows. Must be greater than `0`.
-- `cwd`: Optional working directory. If relative and a session/project context is available, it is resolved relative to that project path.
-- `command`: Optional command argv vector. If omitted, the daemon starts the default shell for the host environment.
-
 **Behavior:**
-- If `cwd` is omitted, the daemon defaults to the associated project path when a session/thread is resolved.
-- If there is no associated project path, it falls back to `project_root` when configured, otherwise the daemon's current working directory.
-- If the resolved `cwd` does not exist or is not a directory, the command fails.
-- On success, the server emits `terminal_created`, followed by `terminal_snapshot`, and then streams `terminal_output` events as data arrives.
-- If the terminal later exits on its own, the server emits `terminal_exited` and then `terminal_closed`.
+- `cols` and `rows` must be greater than `0`.
+- If `cwd` is relative and a project context is available, it is resolved relative to that project path.
+- If `cwd` is omitted, the daemon prefers the session project path, then `project_root`, then the daemon process working directory.
+- On success the daemon emits `terminal_created` and then a `terminal_snapshot`.
 
-**Example:**
+### 13. `attach_terminal`
+Attach to an existing terminal and set the caller's dimensions.
+
 ```json
 {
-  "type": "create_terminal",
-  "thread_id": 123,
-  "cols": 120,
-  "rows": 36,
-  "cwd": ".",
-  "command": ["zsh"]
+  "type": "attach_terminal",
+  "terminal_id": "string",
+  "cols": "number",
+  "rows": "number"
 }
 ```
 
-### 4. `close_terminal`
-Terminate and remove an existing terminal.
+On success the daemon emits `terminal_attached` and then a fresh `terminal_snapshot`.
 
-**Structure:**
+### 14. `terminal_input`
+Send raw input bytes to a terminal.
+
+```json
+{
+  "type": "terminal_input",
+  "terminal_id": "string",
+  "data": "base64-string"
+}
+```
+
+`data` must be base64-encoded. This allows clients to send arbitrary terminal input bytes, including non-UTF-8 and control sequences.
+
+### 15. `terminal_resize`
+```json
+{
+  "type": "terminal_resize",
+  "terminal_id": "string",
+  "cols": "number",
+  "rows": "number"
+}
+```
+
+On success the daemon emits `terminal_resized`.
+
+### 16. `close_terminal`
 ```json
 {
   "type": "close_terminal",
@@ -478,10 +725,9 @@ Terminate and remove an existing terminal.
 }
 ```
 
-### 5. `list_directories`
+### 17. `list_directories`
 Request directory suggestions for path typeahead.
 
-**Structure:**
 ```json
 {
   "type": "list_directories",
@@ -491,20 +737,9 @@ Request directory suggestions for path typeahead.
 }
 ```
 
-**Fields:**
-- `thread_id`: Optional Telegram thread id used to resolve project-relative paths.
-- `session_id`: Optional ACP session id used to resolve project-relative paths when `thread_id` is omitted.
-- `query`: Partial path being completed. Examples: `~/`, `~/github.com/ma`, `.`, `src/han`.
+### 18. `find_files`
+Request fuzzy file search results in the current project directory.
 
-**Behavior:**
-- `~/` expands to the caller's home directory and returns all immediate child directories.
-- Partial final path segments filter by substring match. For example, `~/github.com/ma` matches directories whose basename contains `ma`.
-- Results are returned in a `directory_suggestions` event.
-
-### 6. `find_files`
-Request fuzzy file search results in the current session/project directory.
-
-**Structure:**
 ```json
 {
   "type": "find_files",
@@ -514,19 +749,9 @@ Request fuzzy file search results in the current session/project directory.
 }
 ```
 
-**Fields:**
-- `thread_id`: Optional Telegram thread id used to resolve project-relative paths.
-- `session_id`: Optional ACP session id used to resolve project-relative paths when `thread_id` is omitted.
-- `query`: Query pattern to fuzzy search/match file paths. Space-separated terms match as substrings; non-space queries fuzzy match.
+### 19. `read_file`
+Request file contents from the current project or an absolute path.
 
-**Behavior:**
-- Looks up files in the project path matching the query.
-- Returns results using a `find_files_result` event containing the top 50 matches.
-
-### 7. `read_file`
-Request content of a file within the current project or an absolute path.
-
-**Structure:**
 ```json
 {
   "type": "read_file",
@@ -538,20 +763,27 @@ Request content of a file within the current project or an absolute path.
 }
 ```
 
-**Fields:**
-- `thread_id`: Optional Telegram thread id used to resolve project-relative paths.
-- `session_id`: Optional ACP session id used to resolve project-relative paths when `thread_id` is omitted.
-- `path`: File path to read (relative to the project, or absolute).
-- `start_line`: 1-based start line number to begin reading. Defaults to `1`.
-- `line_count`: Number of lines to read. Defaults to `400`.
+`start_line` defaults to `1`. `line_count` defaults to `400`.
 
-**Behavior:**
-- Slices and returns the lines of the file.
-- Returns results using a `read_file_result` event.
+### 20. `list_terminals`
+```json
+{
+  "type": "list_terminals"
+}
+```
+
+Currently this rebroadcasts the same `snapshot` packet shape used for initial connection state.
+
+### 21. `list_sessions`
+```json
+{
+  "type": "list_sessions"
+}
+```
+
+Currently this also rebroadcasts the same `snapshot` packet shape used for initial connection state.
 
 ---
-
-
 
 ## Clipboard Relay Configuration
 

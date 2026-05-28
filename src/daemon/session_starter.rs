@@ -384,7 +384,7 @@ impl DaemonHandle {
             project_path: project_path.clone(),
             agent_command: agent_cmd.clone(),
             agent_name: agent_name.clone(),
-            name: Arc::new(tokio::sync::Mutex::new(topic_name)),
+            name: Arc::new(tokio::sync::Mutex::new(topic_name.clone())),
             status: status.clone(),
             available_commands: available_commands.clone(),
             control_state: control_state.clone(),
@@ -490,6 +490,7 @@ impl DaemonHandle {
                 SessionEvent::SessionSwitched {
                     thread_id: if thread_id > 0 { Some(thread_id) } else { None },
                     acp_session_id: acp_session_id.clone(),
+                    name: topic_name.clone(),
                     agent_name: agent_name.clone(),
                     agent_command: agent_cmd.clone(),
                     project_path: project_path.clone(),
@@ -498,6 +499,7 @@ impl DaemonHandle {
                 SessionEvent::SessionStarted {
                     thread_id: if thread_id > 0 { Some(thread_id) } else { None },
                     acp_session_id: acp_session_id.clone(),
+                    name: topic_name.clone(),
                     agent_name: agent_name.clone(),
                     agent_command: agent_cmd.clone(),
                     project_path: project_path.clone(),
