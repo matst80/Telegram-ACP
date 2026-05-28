@@ -25,6 +25,8 @@ All messages sent by the server are JSON objects with a `type` field at the top 
 | `terminal_exited` | Terminal process exited | Server -> Client |
 | `terminal_closed` | Terminal was removed from the daemon | Server -> Client |
 | `directory_suggestions` | Directory typeahead suggestions for path inputs | Server -> Client |
+| `find_files_result` | File search suggestions with scoring | Server -> Client |
+| `read_file_result` | Slice of file contents | Server -> Client |
 | `session_switched` | Active session in a topic was changed | Server -> Client |
 | `session_ended` | Agent session terminated | Server -> Client |
 | `session_removed` | Agent session and topic removed | Server -> Client |
@@ -33,6 +35,10 @@ All messages sent by the server are JSON objects with a `type` field at the top 
 | `create_terminal` | Spawn a PTY-backed terminal process | Client -> Server |
 | `close_terminal` | Terminate and remove a terminal | Client -> Server |
 | `list_directories` | Request directory suggestions for typeahead | Client -> Server |
+| `find_files` | Request fuzzy file search results (top 50) | Client -> Server |
+| `read_file` | Read slice of file contents (default 400 lines) | Client -> Server |
+
+
 
 ---
 
@@ -353,7 +359,49 @@ Broadcast in response to `list_directories`. This is intended for path input typ
 - Matching is case-insensitive and uses substring matching on the final path segment.
 - Relative paths are resolved against the associated session project when `thread_id` or `session_id` is supplied.
 
+### 11. `find_files_result`
+Broadcast in response to `find_files`. Returns the top 50 scored files matching the fuzzy query.
+
+**Structure:**
+```json
+{
+  "type": "find_files_result",
+  "query": "string",
+  "files": [
+    "string"
+  ]
+}
+```
+
+**Behavior:**
+- Up to 50 paths are returned, ordered by relevance match score (highest score first).
+- Matches are resolved relative to the associated project path.
+
+### 12. `read_file_result`
+Broadcast in response to `read_file`. Returns a slice of the requested file's lines.
+
+**Structure:**
+```json
+{
+  "type": "read_file_result",
+  "path": "string",
+  "content": "string",
+  "start_line": "number",
+  "line_count": "number",
+  "total_lines": "number"
+}
+```
+
+**Fields:**
+- `path`: The path of the file that was read.
+- `content`: Sliced string content of the requested lines.
+- `start_line`: The 1-based start line of the returned slice.
+- `line_count`: The maximum number of lines requested or returned.
+- `total_lines`: The total number of lines present in the file.
+
 ---
+
+
 
 ## Client -> Server Commands
 
@@ -451,7 +499,57 @@ Request directory suggestions for path typeahead.
 - Partial final path segments filter by substring match. For example, `~/github.com/ma` matches directories whose basename contains `ma`.
 - Results are returned in a `directory_suggestions` event.
 
+### 6. `find_files`
+Request fuzzy file search results in the current session/project directory.
+
+**Structure:**
+```json
+{
+  "type": "find_files",
+  "thread_id": "number | null",
+  "session_id": "string | null",
+  "query": "string"
+}
+```
+
+**Fields:**
+- `thread_id`: Optional Telegram thread id used to resolve project-relative paths.
+- `session_id`: Optional ACP session id used to resolve project-relative paths when `thread_id` is omitted.
+- `query`: Query pattern to fuzzy search/match file paths. Space-separated terms match as substrings; non-space queries fuzzy match.
+
+**Behavior:**
+- Looks up files in the project path matching the query.
+- Returns results using a `find_files_result` event containing the top 50 matches.
+
+### 7. `read_file`
+Request content of a file within the current project or an absolute path.
+
+**Structure:**
+```json
+{
+  "type": "read_file",
+  "thread_id": "number | null",
+  "session_id": "string | null",
+  "path": "string",
+  "start_line": "number | null",
+  "line_count": "number | null"
+}
+```
+
+**Fields:**
+- `thread_id`: Optional Telegram thread id used to resolve project-relative paths.
+- `session_id`: Optional ACP session id used to resolve project-relative paths when `thread_id` is omitted.
+- `path`: File path to read (relative to the project, or absolute).
+- `start_line`: 1-based start line number to begin reading. Defaults to `1`.
+- `line_count`: Number of lines to read. Defaults to `400`.
+
+**Behavior:**
+- Slices and returns the lines of the file.
+- Returns results using a `read_file_result` event.
+
 ---
+
+
 
 ## Clipboard Relay Configuration
 
