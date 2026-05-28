@@ -99,8 +99,10 @@ async fn handle_connection(
                     writer.send(Message::Pong(payload)).await?;
                 }
                 Some(Ok(Message::Text(text))) => {
+                    tracing::info!("Received websocket message: {text}");
                     match serde_json::from_str::<WebSocketCommand>(&text) {
                         Ok(cmd) => {
+                            tracing::debug!("Parsed websocket command successfully: {:?}", cmd);
                             if let Err(err) = command_handler.handle_command(cmd).await {
                                 tracing::warn!("Failed to handle websocket command: {err}");
                                 // Optionally send error back to client

@@ -53,16 +53,20 @@ pub enum SessionEvent {
     SessionStarted {
         thread_id: Option<i32>,
         acp_session_id: String,
-        folder: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         name: Option<String>,
+        agent_name: Option<String>,
+        agent_command: String,
+        project_path: std::path::PathBuf,
     },
     SessionSwitched {
         thread_id: Option<i32>,
         acp_session_id: String,
-        folder: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         name: Option<String>,
+        agent_name: Option<String>,
+        agent_command: String,
+        project_path: std::path::PathBuf,
     },
     SessionEnded {
         thread_id: Option<i32>,
@@ -158,6 +162,17 @@ pub enum SessionEvent {
         source: String,
         content: String,
         truncated: bool,
+    },
+    FindFilesResult {
+        query: String,
+        files: Vec<String>,
+    },
+    ReadFileResult {
+        path: String,
+        content: String,
+        start_line: usize,
+        line_count: usize,
+        total_lines: usize,
     },
 }
 
@@ -284,6 +299,24 @@ pub enum WebSocketCommand {
         #[serde(default)]
         session_id: Option<String>,
         query: String,
+    },
+    FindFiles {
+        #[serde(default)]
+        thread_id: Option<i32>,
+        #[serde(default)]
+        session_id: Option<String>,
+        query: String,
+    },
+    ReadFile {
+        #[serde(default)]
+        thread_id: Option<i32>,
+        #[serde(default)]
+        session_id: Option<String>,
+        path: String,
+        #[serde(default)]
+        start_line: Option<usize>,
+        #[serde(default)]
+        line_count: Option<usize>,
     },
     ListTerminals,
     ListSessions,
@@ -435,8 +468,10 @@ mod tests {
         let test_event = SessionEvent::SessionStarted {
             thread_id: Some(42),
             acp_session_id: "test-session-id".to_string(),
-            folder: "project".to_string(),
             name: Some("project: swift river".to_string()),
+            agent_name: Some("copilot".to_string()),
+            agent_command: "gemini --acp".to_string(),
+            project_path: std::path::PathBuf::from("/tmp/project"),
         };
 
         composite.publish(test_event).await;
@@ -632,4 +667,91 @@ mod tests {
         assert_eq!(json["query"], "~/github.com/ma");
         assert_eq!(json["directories"][0]["path"], "~/github.com/matst80/");
     }
+
+    #[test]
+    fn find_files_deserialization() {
+        let json = r#"{
+            "type": "find_files",
+            "thread_id": 7,
+            "query": "src/main"
+        }"#;
+
+        let cmd: WebSocketCommand = serde_json::from_str(json).unwrap();
+        match cmd {
+            WebSocketCommand::FindFiles {
+                thread_id,
+                session_id,
+                query,
+            } => {
+                assert_eq!(thread_id, Some(7));
+                assert_eq!(session_id, None);
+                assert_eq!(query, "src/main");
+            }
+            _ => panic!("wrong command variant"),
+        }
+    }
+
+    #[test]
+    fn find_files_result_serialization() {
+        let event = SessionEvent::FindFilesResult {
+            query: "src/main".to_string(),
+            files: vec!["src/main.rs".to_string()],
+        };
+
+        let json = serde_json::to_value(event).unwrap();
+        assert_eq!(json["type"], "find_files_result");
+        assert_eq!(json["query"], "src/main");
+        assert_eq!(json["files"][0], "src/main.rs");
+    }
+
+
+    #[test]
+    fn read_file_deserialization() {
+        let json = r#"{
+            "type": "read_file",
+            "thread_id": 7,
+            "path": "src/main.rs",
+            "start_line": 1,
+            "line_count": 400
+        }"#;
+
+        let cmd: WebSocketCommand = serde_json::from_str(json).unwrap();
+        match cmd {
+            WebSocketCommand::ReadFile {
+                thread_id,
+                session_id,
+                path,
+                start_line,
+                line_count,
+            } => {
+                assert_eq!(thread_id, Some(7));
+                assert_eq!(session_id, None);
+                assert_eq!(path, "src/main.rs");
+                assert_eq!(start_line, Some(1));
+                assert_eq!(line_count, Some(400));
+            }
+            _ => panic!("wrong command variant"),
+        }
+    }
+
+    #[test]
+    fn read_file_result_serialization() {
+        let event = SessionEvent::ReadFileResult {
+            path: "src/main.rs".to_string(),
+            content: "fn main() {}".to_string(),
+            start_line: 1,
+            line_count: 400,
+            total_lines: 1,
+        };
+
+        let json = serde_json::to_value(event).unwrap();
+        assert_eq!(json["type"], "read_file_result");
+        assert_eq!(json["path"], "src/main.rs");
+        assert_eq!(json["content"], "fn main() {}");
+        assert_eq!(json["start_line"], 1);
+        assert_eq!(json["line_count"], 400);
+        assert_eq!(json["total_lines"], 1);
+    }
 }
+
+
