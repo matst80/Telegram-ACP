@@ -7,12 +7,20 @@ TELEGRAM_ACP_WEBSOCKET_BIND ?= 0.0.0.0:9001
 PORT ?= 9001
 PROJECT_ROOT ?= /home/mats/github.com/matst80
 
-.PHONY: help build run-daemon
+# Docker Variables
+REGISTRY ?= registry.k6n.net
+IMAGE_NAME ?= matst80/code-acp
+IMAGE_TAG ?= latest
+IMAGE ?= $(REGISTRY)/$(IMAGE_NAME):$(IMAGE_TAG)
+
+.PHONY: help build run-daemon docker-build docker-push
 
 help:
 	@echo "Available targets:"
 	@echo "  build         Build the project"
 	@echo "  run-daemon    Run the daemon with RAG registration and project root"
+	@echo "  docker-build  Build the docker image used for k8s deployment"
+	@echo "  docker-push   Push the docker image to registry"
 
 build:
 	cargo build
@@ -24,3 +32,9 @@ run-daemon:
 		--rag-token $(RAG_TOKEN) \
 		--rag-register-name $(RAG_NAME) \
 		--project-root $(PROJECT_ROOT)
+
+docker-build:
+	docker build -t $(IMAGE) .
+
+docker-push:
+	docker push $(IMAGE)
