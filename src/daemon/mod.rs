@@ -17,6 +17,7 @@ use crate::terminal::TerminalManager;
 use crate::session_manager::{SessionManager, TopicEntry};
 
 pub mod session_starter;
+pub mod agent_launcher;
 pub mod command_handler;
 pub mod directory_service;
 pub mod mcp_handler;

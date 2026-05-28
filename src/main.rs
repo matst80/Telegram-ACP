@@ -11,9 +11,11 @@ mod mcp_relay;
 mod persistence;
 mod relay;
 mod session;
+mod session_consumer;
 mod session_control;
 mod session_log;
 mod session_manager;
+mod session_runtime;
 mod telegram;
 #[allow(dead_code)]
 mod telegraph;
