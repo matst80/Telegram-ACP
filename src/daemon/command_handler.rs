@@ -145,9 +145,13 @@ impl crate::relay::WebSocketCommandHandler for DaemonHandle {
                 // Also remove it from topics if it's headless (negative ID)
                 if let Some(tid) = thread_id {
                     if tid < 0 {
-                        if self.session_manager.topics.remove(&tid).is_some() {
+                        if let Some((_, entry)) = self.session_manager.topics.remove(&tid) {
+                            let acp_session_id = entry.active.as_ref().and_then(|a| a.acp_session_id.clone());
                             self.session_event_sink
-                                .publish(SessionEvent::SessionRemoved { thread_id: tid })
+                                .publish(SessionEvent::SessionRemoved {
+                                    thread_id: tid,
+                                    acp_session_id,
+                                })
                                 .await;
                         }
                     }
@@ -163,9 +167,13 @@ impl crate::relay::WebSocketCommandHandler for DaemonHandle {
                     }
                     if let Some(tid) = to_remove {
                         if tid < 0 {
-                            if self.session_manager.topics.remove(&tid).is_some() {
+                            if let Some((_, entry)) = self.session_manager.topics.remove(&tid) {
+                                let acp_session_id = entry.active.as_ref().and_then(|a| a.acp_session_id.clone());
                                 self.session_event_sink
-                                    .publish(SessionEvent::SessionRemoved { thread_id: tid })
+                                    .publish(SessionEvent::SessionRemoved {
+                                        thread_id: tid,
+                                        acp_session_id,
+                                    })
                                     .await;
                             }
                         }
@@ -197,7 +205,8 @@ impl crate::relay::WebSocketCommandHandler for DaemonHandle {
                             self.session_event_sink
                                 .publish(SessionEvent::Error {
                                     in_reply_to: Some("bind_telegram_thread".to_string()),
-                                    session_id: session_id.clone(),
+                                    acp_session_id: session_id.clone(),
+                                    thread_id: thread_id.clone(),
                                     code: "name_required".to_string(),
                                     message: "name field required when thread_id is null"
                                         .to_string(),
@@ -209,7 +218,8 @@ impl crate::relay::WebSocketCommandHandler for DaemonHandle {
                             self.session_event_sink
                                 .publish(SessionEvent::Error {
                                     in_reply_to: Some("bind_telegram_thread".to_string()),
-                                    session_id: session_id.clone(),
+                                    acp_session_id: session_id.clone(),
+                                    thread_id: thread_id.clone(),
                                     code: "invalid_argument".to_string(),
                                     message: "name too long (max 128 chars)".to_string(),
                                 })
@@ -220,7 +230,8 @@ impl crate::relay::WebSocketCommandHandler for DaemonHandle {
                             self.session_event_sink
                                 .publish(SessionEvent::Error {
                                     in_reply_to: Some("bind_telegram_thread".to_string()),
-                                    session_id: session_id.clone(),
+                                    acp_session_id: session_id.clone(),
+                                    thread_id: thread_id.clone(),
                                     code: "invalid_argument".to_string(),
                                     message: "name contains control characters".to_string(),
                                 })
@@ -295,7 +306,7 @@ impl crate::relay::WebSocketCommandHandler for DaemonHandle {
                         // Emit event
                         self.session_event_sink
                             .publish(SessionEvent::TelegramThreadBound {
-                                session_id: sid,
+                                acp_session_id: sid,
                                 thread_id: resolved_tid,
                                 name: resolved_name,
                                 created,
@@ -435,21 +446,32 @@ impl crate::relay::WebSocketCommandHandler for DaemonHandle {
                 session_id,
                 query,
             } => {
-                let (_, _, project_path) = self.resolve_terminal_context(thread_id, session_id);
+                let (resolved_tid, resolved_sid, project_path) = self.resolve_terminal_context(thread_id, session_id);
                 let directories = self.list_directory_suggestions(&query, project_path.as_ref())?;
                 self.session_event_sink
-                    .publish(SessionEvent::DirectorySuggestions { query, directories })
+                    .publish(SessionEvent::DirectorySuggestions {
+                        thread_id: resolved_tid,
+                        acp_session_id: resolved_sid,
+                        query,
+                        directories,
+                    })
                     .await;
             }
             crate::relay::WebSocketCommand::FindFiles {
                 thread_id,
                 session_id,
                 query,
+                start_directory,
             } => {
-                let (_, _, project_path) = self.resolve_terminal_context(thread_id, session_id);
-                let files = self.find_files(&query, project_path.as_ref())?;
+                let (resolved_tid, resolved_sid, project_path) = self.resolve_terminal_context(thread_id, session_id);
+                let files = self.find_files(&query, project_path.as_ref(), start_directory)?;
                 self.session_event_sink
-                    .publish(SessionEvent::FindFilesResult { query, files })
+                    .publish(SessionEvent::FindFilesResult {
+                        thread_id: resolved_tid,
+                        acp_session_id: resolved_sid,
+                        query,
+                        files,
+                    })
                     .await;
             }
             crate::relay::WebSocketCommand::ReadFile {
@@ -459,7 +481,7 @@ impl crate::relay::WebSocketCommandHandler for DaemonHandle {
                 start_line,
                 line_count,
             } => {
-                let (_, _, project_path) = self.resolve_terminal_context(thread_id, session_id);
+                let (resolved_tid, resolved_sid, project_path) = self.resolve_terminal_context(thread_id, session_id);
                 let (content, resolved_start, resolved_count, total_lines) = self.read_file(
                     &path,
                     start_line,
@@ -468,6 +490,8 @@ impl crate::relay::WebSocketCommandHandler for DaemonHandle {
                 )?;
                 self.session_event_sink
                     .publish(SessionEvent::ReadFileResult {
+                        thread_id: resolved_tid,
+                        acp_session_id: resolved_sid,
                         path,
                         content,
                         start_line: resolved_start,

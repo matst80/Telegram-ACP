@@ -78,9 +78,13 @@ impl DaemonHandle {
     /// Remove a topic from in-memory state and persisted storage.
     pub async fn remove_topic(&self, thread_id: i32) -> Option<TopicEntry> {
         let entry = self.session_manager.remove_topic(thread_id).await?;
+        let acp_session_id = entry.active.as_ref().and_then(|a| a.acp_session_id.clone());
         self.session_manager.persist_topics().await;
         self.session_event_sink
-            .publish(SessionEvent::SessionRemoved { thread_id })
+            .publish(SessionEvent::SessionRemoved {
+                thread_id,
+                acp_session_id,
+            })
             .await;
         Some(entry)
     }
@@ -95,9 +99,8 @@ impl SessionStateProvider for DaemonHandle {
             let topic = entry.value();
             if let Some(active) = &topic.active {
                 let status = *active.status.lock().await;
-                let history = Self::sanitize_history(
-                    active.history.lock().await.iter().cloned().collect(),
-                );
+                let history = active.history.lock().await.iter().cloned().collect();
+                let sanitized_history = Self::sanitize_history(history);
                 let acp_session_id = active.acp_session_id.clone().unwrap_or_default();
                 let name = active.name.lock().await.clone();
                 let available_commands = active.available_commands.lock().await.clone();
@@ -110,7 +113,7 @@ impl SessionStateProvider for DaemonHandle {
                     agent_command: active.agent_command.clone(),
                     agent_name: active.agent_name.clone(),
                     available_commands,
-                    history,
+                    history: sanitized_history,
                 });
             }
         }

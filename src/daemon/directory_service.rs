@@ -177,6 +177,7 @@ impl DaemonHandle {
         &self,
         query: &str,
         project_path: Option<&PathBuf>,
+        start_directory: Option<String>,
     ) -> Result<Vec<String>> {
         let base_dir = project_path
             .cloned()
@@ -189,10 +190,12 @@ impl DaemonHandle {
 
         // 1. Gather all files in the project path
         let mut files = Vec::new();
-        let rg_output = std::process::Command::new("rg")
-            .arg("--files")
-            .current_dir(&base_dir)
-            .output();
+        let mut rg_cmd = std::process::Command::new("rg");
+        rg_cmd.arg("--files");
+        if let Some(start_dir) = &start_directory {
+            rg_cmd.arg(start_dir);
+        }
+        let rg_output = rg_cmd.current_dir(&base_dir).output();
 
         match rg_output {
             Ok(output) if output.status.success() => {
@@ -268,7 +271,19 @@ impl DaemonHandle {
                         }
                     }
                 }
-                walk(&base_dir, &base_dir, &gitignore_patterns, &mut files);
+
+                let walk_dir = if let Some(start_dir) = start_directory {
+                    let p = PathBuf::from(start_dir);
+                    if p.is_absolute() {
+                        p
+                    } else {
+                        base_dir.join(p)
+                    }
+                } else {
+                    base_dir.clone()
+                };
+
+                walk(&walk_dir, &base_dir, &gitignore_patterns, &mut files);
             }
         }
 

@@ -337,6 +337,15 @@
 
         function handleMessage(message) {
             switch (message.type) {
+                case 'session_started':
+                    if (message.focus) {
+                        sessionIdInput.value = message.acp_session_id;
+                        if (message.thread_id) {
+                            threadIdInput.value = message.thread_id;
+                        }
+                        log(`Focus switched to session ${message.acp_session_id} (thread: ${message.thread_id || 'headless'})`);
+                    }
+                    break;
                 case 'snapshot': {
                     if (Array.isArray(message.terminals) && !terminalIdInput.value.trim() && message.terminals.length === 1) {
                         terminalIdInput.value = message.terminals[0].terminal_id;

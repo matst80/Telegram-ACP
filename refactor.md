@@ -306,8 +306,13 @@ The relay module should be easy to test without Telegram, ACP subprocesses, or w
 
 ```rust
 let test_event = SessionEvent::SessionStarted {
-    thread_id: 42,
+    thread_id: Some(42),
     acp_session_id: "test-session-id".to_string(),
+    name: Some("project: swift river".to_string()),
+    agent_name: Some("copilot".to_string()),
+    agent_command: "gemini --acp".to_string(),
+    project_path: std::path::PathBuf::from("/tmp/project"),
+    focus: false,
 };
 
 composite.publish(test_event).await;

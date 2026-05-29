@@ -266,7 +266,7 @@ impl DaemonHandle {
                 self.session_event_sink.clone(),
                 Arc::new(history_sink),
             ]));
-        let resumed_session = existing_acp_session_id.is_some();
+        let _resumed_session = existing_acp_session_id.is_some();
 
         let status = Arc::new(tokio::sync::Mutex::new(SessionStatus::Initializing));
         let session_log = SessionLog::new(
@@ -481,24 +481,14 @@ impl DaemonHandle {
         self.session_manager.persist_topics().await;
 
         session_event_sink
-            .publish(if resumed_session && initiated_via_switch {
-                SessionEvent::SessionSwitched {
-                    thread_id: if thread_id > 0 { Some(thread_id) } else { None },
-                    acp_session_id: acp_session_id.clone(),
-                    name: topic_name.clone(),
-                    agent_name: agent_name.clone(),
-                    agent_command: agent_cmd.clone(),
-                    project_path: project_path.clone(),
-                }
-            } else {
-                SessionEvent::SessionStarted {
-                    thread_id: if thread_id > 0 { Some(thread_id) } else { None },
-                    acp_session_id: acp_session_id.clone(),
-                    name: topic_name.clone(),
-                    agent_name: agent_name.clone(),
-                    agent_command: agent_cmd.clone(),
-                    project_path: project_path.clone(),
-                }
+            .publish(SessionEvent::SessionStarted {
+                thread_id: if thread_id > 0 { Some(thread_id) } else { None },
+                acp_session_id: acp_session_id.clone(),
+                name: topic_name.clone(),
+                agent_name: agent_name.clone(),
+                agent_command: agent_cmd.clone(),
+                project_path: project_path.clone(),
+                focus: initiated_via_switch,
             })
             .await;
 

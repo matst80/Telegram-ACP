@@ -19,7 +19,6 @@ All websocket packets are JSON objects with a top-level `type` field.
 | `user_prompt` | User prompt recorded for a session | Server -> Client |
 | `agent_update` | Agent activity, streamed content, tool calls, completion, errors | Server -> Client |
 | `session_started` | A session became active in a topic | Server -> Client |
-| `session_switched` | The active session in a topic changed | Server -> Client |
 | `session_ended` | A session terminated | Server -> Client |
 | `session_removed` | A headless session/topic entry was removed | Server -> Client |
 | `permission_request` | ACP permission request awaiting a decision | Server -> Client |
@@ -111,7 +110,7 @@ Sent immediately after the websocket connection is established. The same payload
     {
       "terminal_id": "string",
       "thread_id": "number | null",
-      "session_id": "string | null",
+      "acp_session_id": "string | null",
       "cwd": "string",
       "command": ["string", "..."],
       "cols": "number",
@@ -151,54 +150,6 @@ Broadcast when the agent emits activity for a session.
 }
 ```
 
-For `event.type = "update"`, the ACP `SessionUpdate` payload is flattened directly onto `event`. There is no nested `event.update` object. For `finished` and `error`, `content` is a plain string.
-
-**Examples:**
-
-Agent working:
-```json
-{
-  "type": "agent_update",
-  "thread_id": 1,
-  "acp_session_id": "session-1",
-  "event": { "type": "working" }
-}
-```
-
-Streaming text chunk:
-```json
-{
-  "type": "agent_update",
-  "thread_id": 1,
-  "acp_session_id": "session-1",
-  "event": {
-    "type": "update",
-    "sessionUpdate": "agent_message_chunk",
-    "content": {
-      "type": "text",
-      "text": "The partial message..."
-    }
-  }
-}
-```
-
-Tool call started:
-```json
-{
-  "type": "agent_update",
-  "thread_id": 1,
-  "acp_session_id": "session-1",
-  "event": {
-    "type": "update",
-    "sessionUpdate": "tool_call",
-    "toolCallId": "uuid-123",
-    "title": "Search Files",
-    "kind": "search",
-    "status": "in_progress"
-  }
-}
-```
-
 ### 3. `user_prompt`
 Broadcast when a user prompt is recorded for a session.
 
@@ -218,25 +169,24 @@ Broadcast when a user prompt is recorded for a session.
 }
 ```
 
-**Notes:**
-- `content` is omitted when empty.
-- For websocket-originated prompts, the daemon currently emits both `text` and a single text content block.
-
-### 4. `session_started` and `session_switched`
-Broadcast when a session becomes active in a topic or the active session changes.
+### 4. `session_started`
+Broadcast when a session becomes active in a topic.
 
 **Structure:**
 ```json
 {
-  "type": "session_started | session_switched",
+  "type": "session_started",
   "thread_id": "number | null",
   "acp_session_id": "string",
   "name": "string | null",
   "agent_name": "string | null",
   "agent_command": "string",
-  "project_path": "string"
+  "project_path": "string",
+  "focus": "boolean"
 }
 ```
+
+- `focus`: If `true`, the client should consider switching UI focus to this session (e.g. it was initiated by a `/switch` command).
 
 ### 5. `session_ended` and `session_removed`
 Broadcast when a session terminates or when a topic/session entry is removed.
@@ -253,7 +203,8 @@ Broadcast when a session terminates or when a topic/session entry is removed.
 ```json
 {
   "type": "session_removed",
-  "thread_id": "number"
+  "thread_id": "number",
+  "acp_session_id": "string | null"
 }
 ```
 
@@ -272,16 +223,14 @@ Broadcast when the ACP client asks the daemon to resolve a permission prompt.
 }
 ```
 
-The client replies with `permission_response`.
-
 ### 7. `telegram_thread_bound`
-Broadcast after binding a session to a Telegram topic, either by reusing an existing thread or by creating a new one.
+Broadcast after binding a session to a Telegram topic.
 
 **Structure:**
 ```json
 {
   "type": "telegram_thread_bound",
-  "session_id": "string",
+  "acp_session_id": "string",
   "thread_id": "number",
   "name": "string",
   "created": "boolean"
@@ -289,20 +238,19 @@ Broadcast after binding a session to a Telegram topic, either by reusing an exis
 ```
 
 ### 8. `error`
-Broadcast for daemon-side validation or command handling errors that are intentionally surfaced as events.
+Broadcast for daemon-side validation or command handling errors.
 
 **Structure:**
 ```json
 {
   "type": "error",
   "in_reply_to": "string | null",
-  "session_id": "string | null",
+  "acp_session_id": "string | null",
+  "thread_id": "number | null",
   "code": "string",
   "message": "string"
 }
 ```
-
-Examples include validation failures for `bind_telegram_thread`.
 
 ### 9. `session_renamed` and `topic_removed`
 
@@ -326,8 +274,6 @@ Examples include validation failures for `bind_telegram_thread`.
 ### 10. `clipboard_updated`
 Broadcast when the daemon's optional clipboard watcher detects that the local system clipboard content has changed.
 
-This event is daemon-scoped, not session-scoped.
-
 **Structure:**
 ```json
 {
@@ -337,10 +283,6 @@ This event is daemon-scoped, not session-scoped.
   "truncated": "boolean"
 }
 ```
-
-**Notes:**
-- Clipboard updates are broadcast live and are not stored in per-session history.
-- The first observed clipboard value after the watcher starts is also emitted.
 
 ### 11. `terminal_created`
 Broadcast after a new PTY-backed terminal has been created.
@@ -352,7 +294,7 @@ Broadcast after a new PTY-backed terminal has been created.
   "terminal": {
     "terminal_id": "string",
     "thread_id": "number | null",
-    "session_id": "string | null",
+    "acp_session_id": "string | null",
     "cwd": "string",
     "command": ["string", "..."],
     "cols": "number",
@@ -371,34 +313,38 @@ Broadcast after a client attaches to an existing terminal.
 {
   "type": "terminal_attached",
   "terminal_id": "string",
+  "thread_id": "number | null",
+  "acp_session_id": "string | null",
   "cols": "number",
   "rows": "number"
 }
 ```
 
-The daemon also emits a fresh `terminal_snapshot` immediately after attach succeeds.
-
 ### 13. `terminal_output`
-Broadcast when terminal output arrives. `data` is base64-encoded raw output bytes.
+Broadcast when terminal output arrives.
 
 **Structure:**
 ```json
 {
   "type": "terminal_output",
   "terminal_id": "string",
+  "thread_id": "number | null",
+  "acp_session_id": "string | null",
   "sequence": "number",
   "data": "base64-string"
 }
 ```
 
 ### 14. `terminal_snapshot`
-Broadcast as a full-screen terminal snapshot. `data` is base64-encoded formatted screen state.
+Broadcast as a full-screen terminal snapshot.
 
 **Structure:**
 ```json
 {
   "type": "terminal_snapshot",
   "terminal_id": "string",
+  "thread_id": "number | null",
+  "acp_session_id": "string | null",
   "sequence": "number",
   "cols": "number",
   "rows": "number",
@@ -417,6 +363,8 @@ Broadcast when a terminal is resized.
 {
   "type": "terminal_resized",
   "terminal_id": "string",
+  "thread_id": "number | null",
+  "acp_session_id": "string | null",
   "cols": "number",
   "rows": "number"
 }
@@ -429,6 +377,8 @@ Broadcast when a terminal is resized.
 {
   "type": "terminal_exited",
   "terminal_id": "string",
+  "thread_id": "number | null",
+  "acp_session_id": "string | null",
   "exit_code": "number | null"
 }
 ```
@@ -436,7 +386,9 @@ Broadcast when a terminal is resized.
 ```json
 {
   "type": "terminal_closed",
-  "terminal_id": "string"
+  "terminal_id": "string",
+  "thread_id": "number | null",
+  "acp_session_id": "string | null"
 }
 ```
 
@@ -444,14 +396,11 @@ Broadcast when a terminal is resized.
 {
   "type": "terminal_error",
   "terminal_id": "string | null",
+  "thread_id": "number | null",
+  "acp_session_id": "string | null",
   "message": "string"
 }
 ```
-
-**Behavior:**
-- If a terminal is explicitly terminated via `close_terminal`, the daemon emits `terminal_closed`.
-- If a terminal exits on its own, the daemon emits `terminal_exited` and then `terminal_closed`.
-- `terminal_error` is emitted for PTY/runtime failures and may include a `terminal_id` when the failing terminal is known.
 
 ### 17. `directory_suggestions`
 Broadcast in response to `list_directories`.
@@ -460,6 +409,8 @@ Broadcast in response to `list_directories`.
 ```json
 {
   "type": "directory_suggestions",
+  "thread_id": "number | null",
+  "acp_session_id": "string | null",
   "query": "string",
   "directories": [
     {
@@ -469,11 +420,6 @@ Broadcast in response to `list_directories`.
 }
 ```
 
-**Behavior:**
-- Only directories are returned.
-- Suggestions preserve the caller's path style, for example `~/github.com/ma` can return `~/github.com/matst80/`.
-- Relative paths are resolved against the associated project when `thread_id` or `session_id` is supplied.
-
 ### 18. `find_files_result`
 Broadcast in response to `find_files`.
 
@@ -481,16 +427,14 @@ Broadcast in response to `find_files`.
 ```json
 {
   "type": "find_files_result",
+  "thread_id": "number | null",
+  "acp_session_id": "string | null",
   "query": "string",
   "files": [
     "string"
   ]
 }
 ```
-
-**Behavior:**
-- Up to 50 paths are returned, ordered by relevance.
-- Matching is resolved relative to the associated project path.
 
 ### 19. `read_file_result`
 Broadcast in response to `read_file`.
@@ -499,6 +443,8 @@ Broadcast in response to `read_file`.
 ```json
 {
   "type": "read_file_result",
+  "thread_id": "number | null",
+  "acp_session_id": "string | null",
   "path": "string",
   "content": "string",
   "start_line": "number",
@@ -506,13 +452,6 @@ Broadcast in response to `read_file`.
   "total_lines": "number"
 }
 ```
-
-**Fields:**
-- `path`: The path that was read.
-- `content`: The returned line slice.
-- `start_line`: The 1-based start line of the returned slice.
-- `line_count`: The requested or returned slice length.
-- `total_lines`: Total line count in the file.
 
 ---
 
@@ -530,8 +469,6 @@ Commands that act on an existing session usually accept `thread_id`, `session_id
 }
 ```
 
-The daemon records a matching `user_prompt` event before forwarding the prompt to the session.
-
 ### 2. `cancel`
 ```json
 {
@@ -542,8 +479,6 @@ The daemon records a matching `user_prompt` event before forwarding the prompt t
 ```
 
 ### 3. `set_config_option`
-Change an ACP session config option.
-
 ```json
 {
   "type": "set_config_option",
@@ -555,8 +490,6 @@ Change an ACP session config option.
 ```
 
 ### 4. `set_permission_mode`
-Change the ACP permission mode for a session.
-
 ```json
 {
   "type": "set_permission_mode",
@@ -567,8 +500,6 @@ Change the ACP permission mode for a session.
 ```
 
 ### 5. `spawn_session`
-Start a new session. The daemon also accepts `spawn` as an alias for the packet `type`.
-
 ```json
 {
   "type": "spawn_session",
@@ -577,10 +508,6 @@ Start a new session. The daemon also accepts `spawn` as an alias for the packet 
   "thread_id": "number | null"
 }
 ```
-
-**Notes:**
-- `agent_command` also accepts the legacy field name `agent`.
-- If `thread_id` is omitted, the daemon creates a headless session with an internal negative thread id.
 
 ### 6. `end_session`
 ```json
@@ -591,11 +518,7 @@ Start a new session. The daemon also accepts `spawn` as an alias for the packet 
 }
 ```
 
-If the session is headless, ending it can also emit `session_removed`.
-
 ### 7. `permission_response`
-Reply to a pending `permission_request`.
-
 ```json
 {
   "type": "permission_response",
@@ -604,11 +527,7 @@ Reply to a pending `permission_request`.
 }
 ```
 
-`decision` is sent back to ACP as the selected permission option id.
-
 ### 8. `bind_telegram_thread`
-Bind an active session to a Telegram thread.
-
 ```json
 {
   "type": "bind_telegram_thread",
@@ -617,12 +536,6 @@ Bind an active session to a Telegram thread.
   "name": "string | null"
 }
 ```
-
-**Behavior:**
-- If `thread_id` is a positive Telegram topic id, the session is rebound to that thread.
-- If `thread_id` is omitted or non-positive, the daemon creates a new Telegram topic.
-- When creating a topic, `name` is expected. If it is missing, the daemon currently falls back to a derived project name for migration compatibility.
-- Validation failures are emitted as `error` events with `in_reply_to = "bind_telegram_thread"`.
 
 ### 9. `rename_session`
 ```json
@@ -634,8 +547,6 @@ Bind an active session to a Telegram thread.
 }
 ```
 
-On success the daemon emits `session_renamed` and, for real Telegram topics, also renames the forum topic remotely.
-
 ### 10. `remove_topic`
 ```json
 {
@@ -645,8 +556,6 @@ On success the daemon emits `session_renamed` and, for real Telegram topics, als
 ```
 
 ### 11. `execute_command`
-Execute one ACP available command for a session.
-
 ```json
 {
   "type": "execute_command",
@@ -658,8 +567,6 @@ Execute one ACP available command for a session.
 ```
 
 ### 12. `create_terminal`
-Create a new PTY-backed terminal owned by the daemon.
-
 ```json
 {
   "type": "create_terminal",
@@ -672,15 +579,7 @@ Create a new PTY-backed terminal owned by the daemon.
 }
 ```
 
-**Behavior:**
-- `cols` and `rows` must be greater than `0`.
-- If `cwd` is relative and a project context is available, it is resolved relative to that project path.
-- If `cwd` is omitted, the daemon prefers the session project path, then `project_root`, then the daemon process working directory.
-- On success the daemon emits `terminal_created` and then a `terminal_snapshot`.
-
 ### 13. `attach_terminal`
-Attach to an existing terminal and set the caller's dimensions.
-
 ```json
 {
   "type": "attach_terminal",
@@ -690,11 +589,7 @@ Attach to an existing terminal and set the caller's dimensions.
 }
 ```
 
-On success the daemon emits `terminal_attached` and then a fresh `terminal_snapshot`.
-
 ### 14. `terminal_input`
-Send raw input bytes to a terminal.
-
 ```json
 {
   "type": "terminal_input",
@@ -702,8 +597,6 @@ Send raw input bytes to a terminal.
   "data": "base64-string"
 }
 ```
-
-`data` must be base64-encoded. This allows clients to send arbitrary terminal input bytes, including non-UTF-8 and control sequences.
 
 ### 15. `terminal_resize`
 ```json
@@ -715,8 +608,6 @@ Send raw input bytes to a terminal.
 }
 ```
 
-On success the daemon emits `terminal_resized`.
-
 ### 16. `close_terminal`
 ```json
 {
@@ -726,8 +617,6 @@ On success the daemon emits `terminal_resized`.
 ```
 
 ### 17. `list_directories`
-Request directory suggestions for path typeahead.
-
 ```json
 {
   "type": "list_directories",
@@ -738,20 +627,17 @@ Request directory suggestions for path typeahead.
 ```
 
 ### 18. `find_files`
-Request fuzzy file search results in the current project directory.
-
 ```json
 {
   "type": "find_files",
   "thread_id": "number | null",
   "session_id": "string | null",
-  "query": "string"
+  "query": "string",
+  "start_directory": "string | null"
 }
 ```
 
 ### 19. `read_file`
-Request file contents from the current project or an absolute path.
-
 ```json
 {
   "type": "read_file",
@@ -763,16 +649,12 @@ Request file contents from the current project or an absolute path.
 }
 ```
 
-`start_line` defaults to `1`. `line_count` defaults to `400`.
-
 ### 20. `list_terminals`
 ```json
 {
   "type": "list_terminals"
 }
 ```
-
-Currently this rebroadcasts the same `snapshot` packet shape used for initial connection state.
 
 ### 21. `list_sessions`
 ```json
@@ -781,53 +663,8 @@ Currently this rebroadcasts the same `snapshot` packet shape used for initial co
 }
 ```
 
-Currently this also rebroadcasts the same `snapshot` packet shape used for initial connection state.
-
 ---
 
 ## Clipboard Relay Configuration
 
-Clipboard relay is enabled by default whenever the websocket server is enabled.
-
-Enable it with these config keys or environment variables:
-
-- `websocket_clipboard` or `TELEGRAM_ACP_WEBSOCKET_CLIPBOARD`
-- `global_clipboard_intercept` or `TELEGRAM_ACP_GLOBAL_CLIPBOARD_INTERCEPT`
-- `websocket_clipboard_poll_ms` or `TELEGRAM_ACP_WEBSOCKET_CLIPBOARD_POLL_MS`
-- `websocket_clipboard_max_bytes` or `TELEGRAM_ACP_WEBSOCKET_CLIPBOARD_MAX_BYTES`
-
-Set `websocket_clipboard = false` or `TELEGRAM_ACP_WEBSOCKET_CLIPBOARD=false` to turn it off.
-
-Global clipboard interception is a separate opt-in. On macOS it defaults to off, so websocket clipboard relay will not start the global clipboard listener unless `--global-clipboard-intercept`, `global_clipboard_intercept = true`, or `TELEGRAM_ACP_GLOBAL_CLIPBOARD_INTERCEPT=true` is set.
-
-Example:
-
-```toml
-websocket_bind = "0.0.0.0:9001"
-websocket_clipboard = true
-global_clipboard_intercept = true
-websocket_clipboard_poll_ms = 750
-websocket_clipboard_max_bytes = 4096
-```
-
-Security note: clipboard contents often contain secrets, tokens, or personal data. Only enable this on trusted machines and trusted websocket networks.
-
----
-
-## Constants Reference
-
-### Session Status
-- `Initializing`: Agent process starting up.
-- `Idle`: Ready for a new prompt.
-- `Prompting`: Currently processing a user prompt.
-- `Finished`: Session closed normally.
-- `Error`: Session crashed or failed to start.
-
-### Tool Kind
-- `read`, `edit`, `delete`, `move`, `search`, `execute`, `think`, `fetch`, `other`
-
-### Tool Status
-- `pending`, `in_progress`, `completed`, `failed`
-
-### Plan Entry Status
-- `pending`, `in_progress`, `completed`, `failed`, `cancelled`
+... (rest of the file)

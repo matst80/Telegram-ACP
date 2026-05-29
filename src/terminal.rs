@@ -126,6 +126,8 @@ impl TerminalManager {
         self.event_sink
             .publish(SessionEvent::TerminalAttached {
                 terminal_id: terminal_id.to_string(),
+                thread_id: handle.thread_id,
+                acp_session_id: handle.session_id.clone(),
                 cols,
                 rows,
             })
@@ -151,6 +153,8 @@ impl TerminalManager {
         self.event_sink
             .publish(SessionEvent::TerminalResized {
                 terminal_id: terminal_id.to_string(),
+                thread_id: handle.thread_id,
+                acp_session_id: handle.session_id.clone(),
                 cols,
                 rows,
             })
@@ -168,6 +172,8 @@ impl TerminalManager {
         self.event_sink
             .publish(SessionEvent::TerminalClosed {
                 terminal_id: terminal_id.to_string(),
+                thread_id: handle.thread_id,
+                acp_session_id: handle.session_id.clone(),
             })
             .await;
         Ok(())
@@ -250,6 +256,8 @@ impl TerminalManager {
                         handle.closed.store(true, Ordering::SeqCst);
                         sink.publish(SessionEvent::TerminalClosed {
                             terminal_id: handle.terminal_id.clone(),
+                            thread_id: handle.thread_id,
+                            acp_session_id: handle.session_id.clone(),
                         })
                         .await;
                     }
@@ -264,7 +272,7 @@ impl TerminalHandle {
         TerminalInfo {
             terminal_id: self.terminal_id.clone(),
             thread_id: self.thread_id,
-            session_id: self.session_id.clone(),
+            acp_session_id: self.session_id.clone(),
             cwd: self.cwd.clone(),
             command: self.command.clone(),
             cols: self.cols.load(Ordering::SeqCst),
@@ -332,6 +340,8 @@ impl TerminalHandle {
                 self.parser.lock().unwrap().process(&data);
                 Some(SessionEvent::TerminalOutput {
                     terminal_id: self.terminal_id.clone(),
+                    thread_id: self.thread_id,
+                    acp_session_id: self.session_id.clone(),
                     sequence: self.next_sequence(),
                     data: base64::engine::general_purpose::STANDARD.encode(data),
                 })
@@ -341,11 +351,15 @@ impl TerminalHandle {
                 *self.exit_code.lock().unwrap() = exit_code;
                 Some(SessionEvent::TerminalExited {
                     terminal_id: self.terminal_id.clone(),
+                    thread_id: self.thread_id,
+                    acp_session_id: self.session_id.clone(),
                     exit_code,
                 })
             }
             InternalEvent::Error(message) => Some(SessionEvent::TerminalError {
                 terminal_id: Some(self.terminal_id.clone()),
+                thread_id: self.thread_id,
+                acp_session_id: self.session_id.clone(),
                 message,
             }),
         }
@@ -358,6 +372,8 @@ impl TerminalHandle {
         let (cursor_row, cursor_col) = screen.cursor_position();
         SessionEvent::TerminalSnapshot {
             terminal_id: self.terminal_id.clone(),
+            thread_id: self.thread_id,
+            acp_session_id: self.session_id.clone(),
             sequence: self.sequence.load(Ordering::SeqCst),
             cols,
             rows,

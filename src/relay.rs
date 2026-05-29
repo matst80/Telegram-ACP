@@ -19,7 +19,7 @@ pub struct TerminalInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thread_id: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
+    pub acp_session_id: Option<String>,
     pub cwd: std::path::PathBuf,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub command: Vec<String>,
@@ -58,15 +58,8 @@ pub enum SessionEvent {
         agent_name: Option<String>,
         agent_command: String,
         project_path: std::path::PathBuf,
-    },
-    SessionSwitched {
-        thread_id: Option<i32>,
-        acp_session_id: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        name: Option<String>,
-        agent_name: Option<String>,
-        agent_command: String,
-        project_path: std::path::PathBuf,
+        #[serde(default)]
+        focus: bool,
     },
     SessionEnded {
         thread_id: Option<i32>,
@@ -74,6 +67,8 @@ pub enum SessionEvent {
     },
     SessionRemoved {
         thread_id: i32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        acp_session_id: Option<String>,
     },
     PermissionRequest {
         thread_id: Option<i32>,
@@ -83,7 +78,7 @@ pub enum SessionEvent {
         request_id: String,
     },
     TelegramThreadBound {
-        session_id: String,
+        acp_session_id: String,
         thread_id: i32,
         name: String,
         created: bool,
@@ -92,7 +87,9 @@ pub enum SessionEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         in_reply_to: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        session_id: Option<String>,
+        acp_session_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<i32>,
         code: String,
         message: String,
     },
@@ -109,16 +106,22 @@ pub enum SessionEvent {
     },
     TerminalAttached {
         terminal_id: String,
+        thread_id: Option<i32>,
+        acp_session_id: Option<String>,
         cols: u16,
         rows: u16,
     },
     TerminalOutput {
         terminal_id: String,
+        thread_id: Option<i32>,
+        acp_session_id: Option<String>,
         sequence: u64,
         data: String,
     },
     TerminalSnapshot {
         terminal_id: String,
+        thread_id: Option<i32>,
+        acp_session_id: Option<String>,
         sequence: u64,
         cols: u16,
         rows: u16,
@@ -129,23 +132,37 @@ pub enum SessionEvent {
     },
     TerminalResized {
         terminal_id: String,
+        thread_id: Option<i32>,
+        acp_session_id: Option<String>,
         cols: u16,
         rows: u16,
     },
     TerminalExited {
         terminal_id: String,
+        thread_id: Option<i32>,
+        acp_session_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         exit_code: Option<i32>,
     },
     TerminalClosed {
         terminal_id: String,
+        thread_id: Option<i32>,
+        acp_session_id: Option<String>,
     },
     TerminalError {
         #[serde(skip_serializing_if = "Option::is_none")]
         terminal_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<i32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        acp_session_id: Option<String>,
         message: String,
     },
     DirectorySuggestions {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<i32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        acp_session_id: Option<String>,
         query: String,
         directories: Vec<DirectorySuggestion>,
     },
@@ -164,10 +181,18 @@ pub enum SessionEvent {
         truncated: bool,
     },
     FindFilesResult {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<i32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        acp_session_id: Option<String>,
         query: String,
         files: Vec<String>,
     },
     ReadFileResult {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<i32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        acp_session_id: Option<String>,
         path: String,
         content: String,
         start_line: usize,
@@ -306,6 +331,8 @@ pub enum WebSocketCommand {
         #[serde(default)]
         session_id: Option<String>,
         query: String,
+        #[serde(default)]
+        start_directory: Option<String>,
     },
     ReadFile {
         #[serde(default)]
@@ -472,6 +499,7 @@ mod tests {
             agent_name: Some("copilot".to_string()),
             agent_command: "gemini --acp".to_string(),
             project_path: std::path::PathBuf::from("/tmp/project"),
+            focus: false,
         };
 
         composite.publish(test_event).await;
@@ -656,6 +684,8 @@ mod tests {
     #[test]
     fn directory_suggestions_serializes_with_snake_case_tag() {
         let event = SessionEvent::DirectorySuggestions {
+            thread_id: Some(7),
+            session_id: Some("session-1".to_string()),
             query: "~/github.com/ma".to_string(),
             directories: vec![DirectorySuggestion {
                 path: "~/github.com/matst80/".to_string(),
@@ -664,6 +694,8 @@ mod tests {
 
         let json = serde_json::to_value(event).unwrap();
         assert_eq!(json["type"], "directory_suggestions");
+        assert_eq!(json["thread_id"], 7);
+        assert_eq!(json["session_id"], "session-1");
         assert_eq!(json["query"], "~/github.com/ma");
         assert_eq!(json["directories"][0]["path"], "~/github.com/matst80/");
     }
@@ -682,10 +714,12 @@ mod tests {
                 thread_id,
                 session_id,
                 query,
+                start_directory,
             } => {
                 assert_eq!(thread_id, Some(7));
                 assert_eq!(session_id, None);
                 assert_eq!(query, "src/main");
+                assert_eq!(start_directory, None);
             }
             _ => panic!("wrong command variant"),
         }
@@ -694,12 +728,16 @@ mod tests {
     #[test]
     fn find_files_result_serialization() {
         let event = SessionEvent::FindFilesResult {
+            thread_id: Some(7),
+            session_id: Some("session-1".to_string()),
             query: "src/main".to_string(),
             files: vec!["src/main.rs".to_string()],
         };
 
         let json = serde_json::to_value(event).unwrap();
         assert_eq!(json["type"], "find_files_result");
+        assert_eq!(json["thread_id"], 7);
+        assert_eq!(json["session_id"], "session-1");
         assert_eq!(json["query"], "src/main");
         assert_eq!(json["files"][0], "src/main.rs");
     }
@@ -737,6 +775,8 @@ mod tests {
     #[test]
     fn read_file_result_serialization() {
         let event = SessionEvent::ReadFileResult {
+            thread_id: Some(7),
+            session_id: Some("session-1".to_string()),
             path: "src/main.rs".to_string(),
             content: "fn main() {}".to_string(),
             start_line: 1,
@@ -746,6 +786,8 @@ mod tests {
 
         let json = serde_json::to_value(event).unwrap();
         assert_eq!(json["type"], "read_file_result");
+        assert_eq!(json["thread_id"], 7);
+        assert_eq!(json["session_id"], "session-1");
         assert_eq!(json["path"], "src/main.rs");
         assert_eq!(json["content"], "fn main() {}");
         assert_eq!(json["start_line"], 1);
