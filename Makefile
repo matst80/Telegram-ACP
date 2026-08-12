@@ -13,18 +13,22 @@ IMAGE_NAME ?= matst80/code-acp
 IMAGE_TAG ?= latest
 IMAGE ?= $(REGISTRY)/$(IMAGE_NAME):$(IMAGE_TAG)
 
-.PHONY: help build run-daemon run-terminal-share docker-build docker-push
+.PHONY: help build build-terminal-share run-daemon run-terminal-share docker-build docker-push
 
 help:
 	@echo "Available targets:"
-	@echo "  build               Build the project"
-	@echo "  run-daemon          Run the daemon with RAG registration and project root"
-	@echo "  run-terminal-share  Run minimal standalone terminal share server"
-	@echo "  docker-build        Build the docker image used for k8s deployment"
-	@echo "  docker-push         Push the docker image to registry"
+	@echo "  build                 Build the main project"
+	@echo "  build-terminal-share  Build release binary for terminal-share"
+	@echo "  run-daemon            Run the daemon with RAG registration and project root"
+	@echo "  run-terminal-share    Run minimal standalone terminal share server"
+	@echo "  docker-build          Build the docker image used for k8s deployment"
+	@echo "  docker-push           Push the docker image to registry"
 
 build:
 	cargo build
+
+build-terminal-share:
+	cargo build --release --bin terminal_share
 
 run-daemon:
 	cargo run -- daemon \
