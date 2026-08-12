@@ -24,9 +24,9 @@ use crate::types::{DaemonCommand, DaemonResponse};
 
 #[derive(Clone)]
 struct McpServer {
-    bot: Bot,
+    bot: Option<Bot>,
     telegraph: Arc<telegraph_rs::Telegraph>,
-    chat_id: ChatId,
+    chat_id: Option<ChatId>,
     thread_id: Option<i32>,
     project_path: PathBuf,
     socket_path: PathBuf,
@@ -76,17 +76,16 @@ impl McpServer {
         &self,
         Parameters(args): Parameters<RenameTopicArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let Some(tid) = self.thread_id else {
+        let (Some(bot), Some(chat_id), Some(tid)) = (&self.bot, self.chat_id, self.thread_id) else {
             return Err(ErrorData::new(
                 ErrorCode::INVALID_PARAMS,
-                "No Telegram thread associated with this session",
+                "No Telegram bot/chat/thread associated with this session",
                 None,
             ));
         };
         let thread_id = ThreadId(MessageId(tid));
-        if let Err(e) = self
-            .bot
-            .edit_forum_topic(self.chat_id, thread_id)
+        if let Err(e) = bot
+            .edit_forum_topic(chat_id, thread_id)
             .name(&args.name)
             .await
         {
@@ -157,13 +156,12 @@ impl McpServer {
             .await
             .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, e.to_string(), None))?;
 
-        let Some(tid) = self.thread_id else {
+        let (Some(bot), Some(chat_id), Some(tid)) = (&self.bot, self.chat_id, self.thread_id) else {
             return Ok(CallToolResult::success(vec![Content::text(url)]));
         };
         let thread_id = ThreadId(MessageId(tid));
-        if let Err(e) = self
-            .bot
-            .send_message(self.chat_id, format!("Telegraph: {url}"))
+        if let Err(e) = bot
+            .send_message(chat_id, format!("Telegraph: {url}"))
             .message_thread_id(thread_id)
             .await
         {
@@ -185,7 +183,7 @@ impl McpServer {
     ) -> Result<CallToolResult, ErrorData> {
         let (input, filename) = build_input_file(&self.project_path, &args.path)?;
 
-        let Some(tid) = self.thread_id else {
+        let (Some(bot), Some(chat_id), Some(tid)) = (&self.bot, self.chat_id, self.thread_id) else {
             return Err(ErrorData::new(
                 ErrorCode::INVALID_PARAMS,
                 "No Telegram thread associated with this session",
@@ -193,9 +191,8 @@ impl McpServer {
             ));
         };
         let thread_id = ThreadId(MessageId(tid));
-        let mut request = self
-            .bot
-            .send_document(self.chat_id, input)
+        let mut request = bot
+            .send_document(chat_id, input)
             .message_thread_id(thread_id);
         if let Some(caption) = args.caption {
             request = request.caption(caption);
@@ -217,7 +214,7 @@ impl McpServer {
     ) -> Result<CallToolResult, ErrorData> {
         let (input, filename) = build_input_file(&self.project_path, &args.path)?;
 
-        let Some(tid) = self.thread_id else {
+        let (Some(bot), Some(chat_id), Some(tid)) = (&self.bot, self.chat_id, self.thread_id) else {
             return Err(ErrorData::new(
                 ErrorCode::INVALID_PARAMS,
                 "No Telegram thread associated with this session",
@@ -225,9 +222,8 @@ impl McpServer {
             ));
         };
         let thread_id = ThreadId(MessageId(tid));
-        let mut request = self
-            .bot
-            .send_photo(self.chat_id, input)
+        let mut request = bot
+            .send_photo(chat_id, input)
             .message_thread_id(thread_id);
         if let Some(caption) = args.caption {
             request = request.caption(caption);
@@ -256,9 +252,9 @@ impl ServerHandler for McpServer {
 
 impl McpServer {
     fn new(
-        bot: Bot,
+        bot: Option<Bot>,
         telegraph: Arc<telegraph_rs::Telegraph>,
-        chat_id: ChatId,
+        chat_id: Option<ChatId>,
         thread_id: Option<i32>,
         project_path: PathBuf,
         socket_path: PathBuf,
@@ -283,9 +279,9 @@ pub struct McpSession {
 
 impl McpSession {
     pub async fn new(
-        bot: Bot,
+        bot: Option<Bot>,
         telegraph: Arc<telegraph_rs::Telegraph>,
-        chat_id: ChatId,
+        chat_id: Option<ChatId>,
         thread_id: Option<i32>,
         project_path: PathBuf,
         socket_path: PathBuf,

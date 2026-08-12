@@ -1,7 +1,7 @@
 use teloxide::prelude::*;
 use teloxide::types::ParseMode;
 
-use crate::handlers::{EventWriter, OutputRef, TelegramEventWriter};
+use crate::handlers::{EventWriter, NoopEventWriter, OutputRef, TelegramEventWriter};
 
 pub struct EventContext {
     pub writer: Box<dyn EventWriter>,
@@ -11,6 +11,18 @@ impl EventContext {
     pub fn for_telegram(bot: Bot, chat_id: ChatId, thread_id: i32) -> Self {
         Self {
             writer: Box::new(TelegramEventWriter::new(bot, chat_id, thread_id)),
+        }
+    }
+
+    pub fn for_telegram_opt(bot: Option<Bot>, chat_id: Option<ChatId>, thread_id: i32) -> Self {
+        if let (Some(bot), Some(chat_id)) = (bot, chat_id) {
+            Self {
+                writer: Box::new(TelegramEventWriter::new(bot, chat_id, thread_id)),
+            }
+        } else {
+            Self {
+                writer: Box::new(NoopEventWriter),
+            }
         }
     }
 

@@ -177,7 +177,7 @@ pub async fn handle_callback_query(
         }
     };
 
-    if chat_id != ChatId(daemon.config.chat_id) {
+    if daemon.config.chat_id.map(ChatId) != Some(chat_id) {
         return Ok(());
     }
 

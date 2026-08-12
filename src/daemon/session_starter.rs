@@ -35,22 +35,28 @@ impl DaemonHandle {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| path.clone());
         let topic_name = format!("{}: {}", folder_name, Self::generate_two_words());
-        let topic = self
-            .bot
-            .create_forum_topic(ChatId(self.config.chat_id), &topic_name)
-            .icon_color(teloxide::types::Rgb::from_u32(0x6FB9F0))
-            .await?;
-        let thread_id = topic.thread_id.0 .0;
+        // Create forum topic or assign negative thread ID for headless mode
+        let (thread_id, is_telegram) = if let (Some(bot), Some(chat_id)) = (&self.bot, self.config.chat_id) {
+            let topic = bot
+                .create_forum_topic(ChatId(chat_id), &topic_name)
+                .icon_color(teloxide::types::Rgb::from_u32(0x6FB9F0))
+                .await?;
+            (topic.thread_id.0 .0, true)
+        } else {
+            let headless_id = -1 - (self.session_manager.topics.len() as i32);
+            (headless_id, false)
+        };
 
-        let _ = self
-            .bot
-            .send_message(
-                ChatId(self.config.chat_id),
-                format!("<b>Agent is starting up...</b>\n\nStarting ACP session in this topic for <code>{}</code>", crate::formatting::escape_html(&path)),
-            )
-            .message_thread_id(teloxide::types::ThreadId(teloxide::types::MessageId(thread_id)))
-            .parse_mode(teloxide::types::ParseMode::Html)
-            .await;
+        if let (Some(bot), Some(chat_id)) = (&self.bot, self.config.chat_id) {
+            let _ = bot
+                .send_message(
+                    ChatId(chat_id),
+                    format!("<b>Agent is starting up...</b>\n\nStarting ACP session in this topic for <code>{}</code>", crate::formatting::escape_html(&path)),
+                )
+                .message_thread_id(teloxide::types::ThreadId(teloxide::types::MessageId(thread_id)))
+                .parse_mode(teloxide::types::ParseMode::Html)
+                .await;
+        }
 
         let acp_session_id = match self
             .enqueue_start_session(
@@ -66,30 +72,32 @@ impl DaemonHandle {
         {
             Ok(session_id) => session_id,
             Err(e) => {
-                let delete_result = self
-                    .bot
-                    .delete_forum_topic(
-                        ChatId(self.config.chat_id),
-                        teloxide::types::ThreadId(teloxide::types::MessageId(thread_id)),
-                    )
-                    .await;
-                if let Err(delete_err) = delete_result {
-                    tracing::warn!(
-                        "Failed to delete forum topic {} after ACP init failure: {}",
-                        thread_id,
-                        delete_err
-                    );
+                if is_telegram {
+                    if let (Some(bot), Some(chat_id)) = (&self.bot, self.config.chat_id) {
+                        let delete_result = bot
+                            .delete_forum_topic(
+                                ChatId(chat_id),
+                                teloxide::types::ThreadId(teloxide::types::MessageId(thread_id)),
+                            )
+                            .await;
+                        if let Err(delete_err) = delete_result {
+                            tracing::warn!(
+                                "Failed to delete forum topic {} after ACP init failure: {}",
+                                thread_id,
+                                delete_err
+                            );
+                        }
+                        let _ = bot
+                            .send_message(
+                                ChatId(chat_id),
+                                format!(
+                                    "Failed to initialize ACP session for '{}' (topic {}). Topic was removed. Error:\n{:#}",
+                                    path, thread_id, e
+                                ),
+                            )
+                            .await;
+                    }
                 }
-                let _ = self
-                    .bot
-                    .send_message(
-                        ChatId(self.config.chat_id),
-                        format!(
-                            "Failed to initialize ACP session for '{}' (topic {}). Topic was removed. Error:\n{:#}",
-                            path, thread_id, e
-                        ),
-                    )
-                    .await;
                 return Err(e);
             }
         };
@@ -163,15 +171,16 @@ impl DaemonHandle {
 
     /// Restore a previously persisted session. Skips topic creation since the topic already exists.
     pub(crate) async fn restore_session(&self, thread_id: i32, record: &SessionRecord) -> Result<()> {
-        let _ = self
-            .bot
-            .send_message(
-                ChatId(self.config.chat_id),
-                format!("<b>Agent is restarting...</b>\n\nRestoring ACP session in this topic for <code>{}</code>", crate::formatting::escape_html(&record.project_path.to_string_lossy())),
-            )
-            .message_thread_id(teloxide::types::ThreadId(teloxide::types::MessageId(thread_id)))
-            .parse_mode(teloxide::types::ParseMode::Html)
-            .await;
+        if let (Some(bot), Some(chat_id)) = (&self.bot, self.config.chat_id) {
+            let _ = bot
+                .send_message(
+                    ChatId(chat_id),
+                    format!("<b>Agent is restarting...</b>\n\nRestoring ACP session in this topic for <code>{}</code>", crate::formatting::escape_html(&record.project_path.to_string_lossy())),
+                )
+                .message_thread_id(teloxide::types::ThreadId(teloxide::types::MessageId(thread_id)))
+                .parse_mode(teloxide::types::ParseMode::Html)
+                .await;
+        }
 
         let acp_session_id = self
             .enqueue_start_session(
@@ -186,13 +195,14 @@ impl DaemonHandle {
             .await?;
 
         // Reopen the topic in case it was closed
-        let _ = self
-            .bot
-            .reopen_forum_topic(
-                ChatId(self.config.chat_id),
-                teloxide::types::ThreadId(teloxide::types::MessageId(thread_id)),
-            )
-            .await;
+        if let (Some(bot), Some(chat_id)) = (&self.bot, self.config.chat_id) {
+            let _ = bot
+                .reopen_forum_topic(
+                    ChatId(chat_id),
+                    teloxide::types::ThreadId(teloxide::types::MessageId(thread_id)),
+                )
+                .await;
+        }
 
         tracing::info!(
             "Restored session {} (thread {}, acp {})",
@@ -281,7 +291,7 @@ impl DaemonHandle {
             crate::mcp::McpSession::new(
                 self.bot.clone(),
                 self.telegraph.clone(),
-                ChatId(self.config.chat_id),
+                self.config.chat_id.map(ChatId),
                 if thread_id > 0 { Some(thread_id) } else { None },
                 project_path.clone(),
                 self.config.socket_path.clone(),
@@ -294,7 +304,7 @@ impl DaemonHandle {
 
         // Spawn the event consumer within LocalSet.
         let bot = self.bot.clone();
-        let chat_id = ChatId(self.config.chat_id);
+        let chat_id = self.config.chat_id.map(ChatId);
         let thread_id_ref = Arc::new(std::sync::atomic::AtomicI32::new(thread_id));
         if thread_id > 0 {
             tokio::task::spawn_local(with_session_context(
@@ -330,7 +340,7 @@ impl DaemonHandle {
                         thread_id_ref_clone.load(std::sync::atomic::Ordering::Relaxed);
                     if current_tid > 0 {
                         if ctx.is_none() {
-                            ctx = Some(crate::handlers::EventContext::for_telegram(
+                            ctx = Some(crate::handlers::EventContext::for_telegram_opt(
                                 bot_clone.clone(),
                                 chat_id_clone,
                                 current_tid,
@@ -412,7 +422,7 @@ impl DaemonHandle {
                 permission_handling,
                 self.pending_permissions.clone(),
                 self.bot.clone(),
-                ChatId(self.config.chat_id),
+                self.config.chat_id.map(ChatId),
                 thread_id,
                 existing_acp_session_id,
                 initiated_via_switch,

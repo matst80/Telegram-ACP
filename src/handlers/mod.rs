@@ -12,4 +12,4 @@ pub mod working;
 pub use consumer::{EventHandler, SessionEventConsumer};
 pub use context::EventContext;
 pub use throttle::OutboundThrottle;
-pub use writer::{EventWriter, OutputRef, TelegramEventWriter};
+pub use writer::{EventWriter, NoopEventWriter, OutputRef, TelegramEventWriter};

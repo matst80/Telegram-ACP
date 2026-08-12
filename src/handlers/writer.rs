@@ -432,3 +432,29 @@ impl EventWriter for TelegramEventWriter {
         Ok(())
     }
 }
+
+pub struct NoopEventWriter;
+
+#[async_trait::async_trait(?Send)]
+impl EventWriter for NoopEventWriter {
+    async fn send_html(&mut self, _text: &str, _silent: bool) -> Option<OutputRef> {
+        None
+    }
+    async fn send_html_drop(&mut self, _text: &str, _silent: bool) -> Option<OutputRef> {
+        None
+    }
+    async fn edit_html(&mut self, _id: OutputRef, _text: &str) -> bool {
+        false
+    }
+    async fn edit_html_drop(&mut self, _id: OutputRef, _text: &str) -> bool {
+        false
+    }
+    async fn delete(&mut self, _id: OutputRef) {}
+    async fn pin(&mut self, _id: OutputRef) {}
+    async fn close_thread(&mut self) {}
+    async fn send_html_chunks(&mut self, _text: &str, _silent: bool) {}
+    async fn send_chunks(&mut self, _text: &str, _parse_mode: ParseMode, _silent: bool) {}
+    async fn send_draft(&mut self, _draft_id: i64, _text: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+}

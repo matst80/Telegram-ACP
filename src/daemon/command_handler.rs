@@ -274,11 +274,13 @@ impl crate::relay::WebSocketCommandHandler for DaemonHandle {
                             };
                             format!("{}: {}", folder_name, Self::generate_two_words())
                         };
-                        let topic = self
-                            .bot
-                            .create_forum_topic(ChatId(self.config.chat_id), &topic_name)
-                            .icon_color(teloxide::types::Rgb::from_u32(0x6FB9F0))
-                            .await?;
+                        let topic = {
+                            let bot = self.bot.as_ref().ok_or_else(|| anyhow::anyhow!("Telegram bot is not configured"))?;
+                            let chat_id = self.config.chat_id.ok_or_else(|| anyhow::anyhow!("Telegram chat_id is not configured"))?;
+                            bot.create_forum_topic(ChatId(chat_id), &topic_name)
+                                .icon_color(teloxide::types::Rgb::from_u32(0x6FB9F0))
+                                .await?
+                        };
                         (topic.thread_id.0 .0, topic_name)
                     }
                 };
@@ -352,14 +354,15 @@ impl crate::relay::WebSocketCommandHandler for DaemonHandle {
 
                     // Rename telegram topic if it exists
                     if tid > 0 {
-                        let _ = self
-                            .bot
-                            .edit_forum_topic(
-                                ChatId(self.config.chat_id),
-                                teloxide::types::ThreadId(teloxide::types::MessageId(tid)),
-                            )
-                            .name(&name)
-                            .await;
+                        if let (Some(bot), Some(chat_id)) = (&self.bot, self.config.chat_id) {
+                            let _ = bot
+                                .edit_forum_topic(
+                                    ChatId(chat_id),
+                                    teloxide::types::ThreadId(teloxide::types::MessageId(tid)),
+                                )
+                                .name(&name)
+                                .await;
+                        }
                     }
                 }
             }

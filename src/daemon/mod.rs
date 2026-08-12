@@ -27,13 +27,13 @@ pub mod utils;
 /// Shared daemon state, accessible from Telegram handlers and IPC.
 pub struct DaemonHandle {
     pub config: Config,
-    pub bot: Bot,
+    pub bot: Option<Bot>,
     #[allow(dead_code)]
     pub telegraph: Arc<Telegraph>,
     pub session_event_sink: Arc<dyn SessionEventSink>,
     pub start_time: std::sync::atomic::AtomicI64,
     /// Relay for starting ACP sessions inside the daemon's LocalSet task.
-    pub(crate) local_start_tx: mpsc::UnboundedSender<StartSessionRequest>,
+    pub local_start_tx: mpsc::UnboundedSender<StartSessionRequest>,
     pub session_manager: SessionManager,
     pub terminal_manager: Arc<TerminalManager>,
     pub pending_permissions: Arc<DashMap<String, oneshot::Sender<agent_client_protocol::PermissionOptionId>>>,
@@ -132,7 +132,7 @@ impl SessionStateProvider for DaemonHandle {
 pub async fn run_daemon(config: Config) -> Result<()> {
     tracing::info!("Starting telegram-acp daemon");
 
-    let bot = Bot::new(&config.bot_token);
+    let bot = config.bot_token.as_ref().map(|token| Bot::new(token));
     let telegraph =
         Arc::new(crate::telegraph::create_account(config.telegraph_author.as_deref()).await?);
     let (local_start_tx, mut local_start_rx) = mpsc::unbounded_channel::<StartSessionRequest>();
@@ -265,7 +265,7 @@ pub async fn run_daemon(config: Config) -> Result<()> {
                                 acp_session_id,
                                 topic_url: format!(
                                     "https://t.me/c/{}/{}",
-                                    daemon.config.chat_id, thread_id
+                                    daemon.config.chat_id.unwrap_or_default(), thread_id
                                 ),
                             },
                             Err(e) => DaemonResponse::Error {
@@ -370,13 +370,17 @@ pub async fn run_daemon(config: Config) -> Result<()> {
         daemon.session_manager.persist_topics().await;
     }
 
-    // Run Telegram bot (blocks)
     daemon.start_time.store(
         chrono::Utc::now().timestamp(),
         std::sync::atomic::Ordering::Relaxed,
     );
 
-    crate::telegram::run_bot(bot, daemon).await;
+    if let Some(bot) = bot {
+        crate::telegram::run_bot(bot, daemon).await;
+    } else {
+        tracing::info!("Running daemon in headless mode (no Telegram bot token configured)");
+        tokio::signal::ctrl_c().await?;
+    }
 
     Ok(())
 }

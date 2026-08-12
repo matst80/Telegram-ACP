@@ -29,8 +29,8 @@ pub async fn spawn_and_run_agent(
     control_state: Arc<tokio::sync::Mutex<session_control::SessionControlState>>,
     permission_handling: Arc<std::sync::Mutex<crate::types::PermissionHandling>>,
     pending_permissions: Arc<DashMap<String, oneshot::Sender<acp_sdk::PermissionOptionId>>>,
-    bot: Bot,
-    chat_id: ChatId,
+    bot: Option<Bot>,
+    chat_id: Option<ChatId>,
     thread_id: i32,
     existing_acp_session_id: Option<String>,
     initiated_via_switch: bool,
@@ -64,12 +64,14 @@ pub async fn spawn_and_run_agent(
                 if initiated_via_switch {
                     let msg =
                         "Switched to the selected session. Replay hidden; ready for new prompts.";
-                    let _ = bot
-                        .send_message(chat_id, msg)
-                        .message_thread_id(teloxide::types::ThreadId(teloxide::types::MessageId(
-                            thread_id,
-                        )))
-                        .await;
+                    if let (Some(bot), Some(chat_id)) = (&bot, chat_id) {
+                        let _ = bot
+                            .send_message(chat_id, msg)
+                            .message_thread_id(teloxide::types::ThreadId(teloxide::types::MessageId(
+                                thread_id,
+                            )))
+                            .await;
+                    }
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 session_loading_in_progress.store(false, Ordering::Relaxed);
@@ -129,29 +131,24 @@ pub async fn spawn_and_run_agent(
             sess_info!("Session runtime finished");
         }
         Err(e) => {
-            sess_error!(
-                "Failed to initialize ACP agent (cmd: {}, project: {}): {:#}",
-                agent_cmd,
-                project_path.display(),
-                e
-            );
-            tracing::error!(
-                "Failed to initialize ACP agent (cmd: {}, project: {}): {:#}",
-                agent_cmd,
-                project_path.display(),
-                e
-            );
+            sess_error!("ACP init failed: {e}");
+            {
+                let mut s = status.lock().await;
+                *s = SessionStatus::Error;
+            }
             let stderr_path = session_log.agent_stderr_path();
             if stderr_path.exists() {
                 let metadata = std::fs::metadata(&stderr_path).ok();
                 if metadata.map(|m| m.len() > 0).unwrap_or(false) {
-                    let _ = bot
-                        .send_document(chat_id, teloxide::types::InputFile::file(stderr_path))
-                        .caption("Agent stderr log")
-                        .message_thread_id(teloxide::types::ThreadId(teloxide::types::MessageId(
-                            thread_id,
-                        )))
-                        .await;
+                    if let (Some(bot), Some(chat_id)) = (&bot, chat_id) {
+                        let _ = bot
+                            .send_document(chat_id, teloxide::types::InputFile::file(stderr_path))
+                            .caption("Agent stderr log")
+                            .message_thread_id(teloxide::types::ThreadId(teloxide::types::MessageId(
+                                thread_id,
+                            )))
+                            .await;
+                    }
                 }
             }
             let _ = result_tx.send(Err(e));
@@ -168,8 +165,8 @@ async fn init_agent(
     event_sink: Arc<dyn SessionEventSink>,
     existing_acp_session_id: &Option<String>,
     mcp_servers: Vec<acp_sdk::McpServer>,
-    bot: Bot,
-    chat_id: ChatId,
+    bot: Option<Bot>,
+    chat_id: Option<ChatId>,
     thread_id: i32,
     permission_handling: Arc<std::sync::Mutex<crate::types::PermissionHandling>>,
     pending_permissions: Arc<DashMap<String, oneshot::Sender<acp_sdk::PermissionOptionId>>>,

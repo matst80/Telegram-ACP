@@ -15,8 +15,10 @@ pub async fn run_bot(bot: Bot, daemon: Arc<DaemonHandle>) {
     use teloxide::dptree;
     use teloxide::types::Update;
 
-    if let Err(e) = register_bot_commands(&bot, daemon.config.chat_id).await {
-        tracing::warn!("Failed to register Telegram slash commands: {e}");
+    if let Some(chat_id) = daemon.config.chat_id {
+        if let Err(e) = register_bot_commands(&bot, chat_id).await {
+            tracing::warn!("Failed to register Telegram slash commands: {e}");
+        }
     }
 
     let handler = dptree::entry()
@@ -42,7 +44,7 @@ async fn register_bot_commands(bot: &Bot, chat_id: i64) -> anyhow::Result<()> {
 
 /// Handle an incoming Telegram message.
 async fn handle_message(bot: Bot, msg: Message, daemon: Arc<DaemonHandle>) -> anyhow::Result<()> {
-    if msg.chat.id != ChatId(daemon.config.chat_id) {
+    if daemon.config.chat_id.map(ChatId) != Some(msg.chat.id) {
         return Ok(());
     }
 

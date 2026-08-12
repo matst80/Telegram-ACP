@@ -1,6 +1,6 @@
 use crate::config::Config;
 
-pub(crate) async fn run_rag_registration(config: Config, actual_port: u16) {
+pub async fn run_rag_registration(config: Config, actual_port: u16) {
     let url = match config.rag_register_url.as_ref() {
         Some(u) => u,
         None => return,

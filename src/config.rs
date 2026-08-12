@@ -18,14 +18,14 @@ pub struct FileMcpServerConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
-    pub bot_token: String,
-    pub chat_id: i64,
+    pub bot_token: Option<String>,
+    pub chat_id: Option<i64>,
     pub telegraph_author: Option<String>,
     #[allow(dead_code)]
     pub telegraph_author_url: Option<String>,
     pub socket_path: PathBuf,
     pub websocket_bind: Option<String>,
-    pub default_agent: String,
+    pub default_agent: Option<String>,
     pub agents: HashMap<String, String>,
     pub websocket_history_limit: usize,
     pub websocket_clipboard: bool,
@@ -79,16 +79,13 @@ impl Config {
             FileConfig::default()
         };
 
-        let bot_token = env_or("TELEGRAM_ACP_BOT_TOKEN", file_config.bot_token)
-            .context("bot_token is required (set TELEGRAM_ACP_BOT_TOKEN or config file)")?;
+        let bot_token = env_or("TELEGRAM_ACP_BOT_TOKEN", file_config.bot_token);
 
         let chat_id = env_or(
             "TELEGRAM_ACP_CHAT_ID",
             file_config.chat_id.map(|id| id.to_string()),
         )
-        .context("chat_id is required (set TELEGRAM_ACP_CHAT_ID or config file)")?
-        .parse::<i64>()
-        .context("chat_id must be a valid integer")?;
+        .and_then(|id| id.parse::<i64>().ok());
 
         let socket_path = env_or(
             "TELEGRAM_ACP_SOCKET_PATH",
@@ -140,9 +137,10 @@ impl Config {
                 } else {
                     None
                 }
-            })
-            .context("default_agent is required (set TELEGRAM_ACP_DEFAULT_AGENT or config file)")?;
-        ensure_agent_exists(&default_agent, &agents)?;
+            });
+        if let Some(agent) = &default_agent {
+            ensure_agent_exists(agent, &agents)?;
+        }
 
         let telegraph_author = env_or(
             "TELEGRAM_ACP_TELEGRAPH_AUTHOR",
@@ -201,10 +199,13 @@ impl Config {
     }
 
     pub fn resolve_agent(&self, selected_agent: Option<&str>) -> Result<(String, String)> {
-        let selected_agent = selected_agent
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .unwrap_or(&self.default_agent);
+        let selected_agent = match selected_agent.map(str::trim).filter(|v| !v.is_empty()) {
+            Some(agent) => agent,
+            None => self
+                .default_agent
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("No default agent configured"))?,
+        };
 
         let command =
             self.agents.get(selected_agent).cloned().ok_or_else(|| {

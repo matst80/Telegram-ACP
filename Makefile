@@ -13,14 +13,15 @@ IMAGE_NAME ?= matst80/code-acp
 IMAGE_TAG ?= latest
 IMAGE ?= $(REGISTRY)/$(IMAGE_NAME):$(IMAGE_TAG)
 
-.PHONY: help build run-daemon docker-build docker-push
+.PHONY: help build run-daemon run-terminal-share docker-build docker-push
 
 help:
 	@echo "Available targets:"
-	@echo "  build         Build the project"
-	@echo "  run-daemon    Run the daemon with RAG registration and project root"
-	@echo "  docker-build  Build the docker image used for k8s deployment"
-	@echo "  docker-push   Push the docker image to registry"
+	@echo "  build               Build the project"
+	@echo "  run-daemon          Run the daemon with RAG registration and project root"
+	@echo "  run-terminal-share  Run minimal standalone terminal share server"
+	@echo "  docker-build        Build the docker image used for k8s deployment"
+	@echo "  docker-push         Push the docker image to registry"
 
 build:
 	cargo build
@@ -28,6 +29,13 @@ build:
 run-daemon:
 	cargo run -- daemon \
 		--websocket-bind 0.0.0.0:$(PORT) \
+		--rag-register-url $(RAG_URL) \
+		--rag-token $(RAG_TOKEN) \
+		--project-root $(PROJECT_ROOT)
+
+run-terminal-share:
+	cargo run --bin terminal_share -- \
+		--bind 0.0.0.0:$(PORT) \
 		--rag-register-url $(RAG_URL) \
 		--rag-token $(RAG_TOKEN) \
 		--project-root $(PROJECT_ROOT)

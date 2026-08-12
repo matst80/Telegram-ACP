@@ -80,8 +80,8 @@ pub(crate) fn normalize_stop_reason_token(raw: &str) -> String {
 pub async fn run_session_runtime(
     conn: Arc<acp::ClientSideConnection>,
     acp_session_id: acp::SessionId,
-    bot: Bot,
-    chat_id: ChatId,
+    bot: Option<Bot>,
+    chat_id: Option<ChatId>,
     thread_id: i32,
     mut command_rx: mpsc::UnboundedReceiver<SessionCommand>,
     mut cancel_rx: mpsc::UnboundedReceiver<oneshot::Sender<anyhow::Result<()>>>,
@@ -407,11 +407,14 @@ fn build_interrupt_callback_data(thread_id: i32) -> String {
 }
 
 async fn send_queued_notice(
-    bot: &Bot,
-    chat_id: ChatId,
+    bot: &Option<Bot>,
+    chat_id: Option<ChatId>,
     thread_id: i32,
     queued_prompts: &VecDeque<Vec<acp::ContentBlock>>,
 ) {
+    let (Some(bot), Some(chat_id)) = (bot, chat_id) else {
+        return;
+    };
     let mut lines = Vec::with_capacity(queued_prompts.len() + 2);
     lines.push("Agent is currently working.".to_string());
     lines.push("Your message was queued. Pending queue:".to_string());

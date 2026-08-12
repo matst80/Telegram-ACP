@@ -436,13 +436,13 @@ mod tests {
     #[tokio::test]
     async fn test_read_file() {
         let config = crate::config::Config {
-            bot_token: "test".to_string(),
-            chat_id: 123,
+            bot_token: Some("test".to_string()),
+            chat_id: Some(123),
             telegraph_author: None,
             telegraph_author_url: None,
             socket_path: std::path::PathBuf::from("/tmp/test.sock"),
             websocket_bind: None,
-            default_agent: "test".to_string(),
+            default_agent: Some("test".to_string()),
             agents: std::collections::HashMap::new(),
             websocket_history_limit: 10,
             websocket_clipboard: false,
@@ -465,7 +465,7 @@ mod tests {
 
         let daemon = DaemonHandle {
             config,
-            bot: Bot::new("token"),
+            bot: Some(Bot::new("token")),
             telegraph: std::sync::Arc::new(telegraph_client),
             session_event_sink: std::sync::Arc::new(crate::relay::NoopSessionEventSink),
             start_time: std::sync::atomic::AtomicI64::new(0),

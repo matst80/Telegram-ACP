@@ -663,7 +663,7 @@ mod tests {
             terminals: vec![TerminalInfo {
                 terminal_id: "term-1".to_string(),
                 thread_id: Some(11),
-                session_id: Some("session-1".to_string()),
+            acp_session_id: Some("session-1".to_string()),
                 cwd: std::path::PathBuf::from("/tmp/project"),
                 command: vec!["bash".to_string()],
                 cols: 80,
@@ -685,7 +685,7 @@ mod tests {
     fn directory_suggestions_serializes_with_snake_case_tag() {
         let event = SessionEvent::DirectorySuggestions {
             thread_id: Some(7),
-            session_id: Some("session-1".to_string()),
+            acp_session_id: Some("session-1".to_string()),
             query: "~/github.com/ma".to_string(),
             directories: vec![DirectorySuggestion {
                 path: "~/github.com/matst80/".to_string(),
@@ -695,7 +695,7 @@ mod tests {
         let json = serde_json::to_value(event).unwrap();
         assert_eq!(json["type"], "directory_suggestions");
         assert_eq!(json["thread_id"], 7);
-        assert_eq!(json["session_id"], "session-1");
+        assert_eq!(json["acp_session_id"], "session-1");
         assert_eq!(json["query"], "~/github.com/ma");
         assert_eq!(json["directories"][0]["path"], "~/github.com/matst80/");
     }
@@ -729,7 +729,7 @@ mod tests {
     fn find_files_result_serialization() {
         let event = SessionEvent::FindFilesResult {
             thread_id: Some(7),
-            session_id: Some("session-1".to_string()),
+            acp_session_id: Some("session-1".to_string()),
             query: "src/main".to_string(),
             files: vec!["src/main.rs".to_string()],
         };
@@ -737,7 +737,7 @@ mod tests {
         let json = serde_json::to_value(event).unwrap();
         assert_eq!(json["type"], "find_files_result");
         assert_eq!(json["thread_id"], 7);
-        assert_eq!(json["session_id"], "session-1");
+        assert_eq!(json["acp_session_id"], "session-1");
         assert_eq!(json["query"], "src/main");
         assert_eq!(json["files"][0], "src/main.rs");
     }
@@ -776,7 +776,7 @@ mod tests {
     fn read_file_result_serialization() {
         let event = SessionEvent::ReadFileResult {
             thread_id: Some(7),
-            session_id: Some("session-1".to_string()),
+            acp_session_id: Some("session-1".to_string()),
             path: "src/main.rs".to_string(),
             content: "fn main() {}".to_string(),
             start_line: 1,
@@ -787,7 +787,7 @@ mod tests {
         let json = serde_json::to_value(event).unwrap();
         assert_eq!(json["type"], "read_file_result");
         assert_eq!(json["thread_id"], 7);
-        assert_eq!(json["session_id"], "session-1");
+        assert_eq!(json["acp_session_id"], "session-1");
         assert_eq!(json["path"], "src/main.rs");
         assert_eq!(json["content"], "fn main() {}");
         assert_eq!(json["start_line"], 1);
