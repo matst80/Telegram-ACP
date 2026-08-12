@@ -43,6 +43,8 @@ ExecStart=%h/.local/bin/terminal_share \
   --bind 0.0.0.0:9001 \
   --rag-register-url https://rag.k6n.net/api/acp/register \
   --rag-token YOUR_RAG_TOKEN \
+  --rag-register-name acp-mac \
+  --rag-register-host 10.10.10.205 \
   --project-root %h
 Restart=on-failure
 RestartSec=5s

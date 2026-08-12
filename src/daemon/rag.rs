@@ -12,10 +12,18 @@ pub async fn run_rag_registration(config: Config, actual_port: u16) {
             return;
         }
     };
-    let name = config
-        .rag_register_name
-        .clone()
-        .unwrap_or_else(|| format!("acp-ws-{}", actual_port));
+    let name = config.rag_register_name.clone().unwrap_or_else(|| {
+        let raw_hostname = if let Ok(output) = std::process::Command::new("hostname").output() {
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        } else {
+            format!("acp-ws-{}", actual_port)
+        };
+        if raw_hostname.is_empty() {
+            format!("acp-ws-{}", actual_port)
+        } else {
+            raw_hostname
+        }
+    });
     let host = config
         .rag_register_host
         .clone()
