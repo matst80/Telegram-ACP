@@ -61,7 +61,7 @@ async fn async_main() -> Result<()> {
 
     tracing::info!(bind = %cli.bind, "Starting minimal terminal-share server");
 
-    let config = Config {
+    let mut config = Config::load().unwrap_or_else(|_| Config {
         bot_token: None,
         chat_id: None,
         telegraph_author: None,
@@ -76,14 +76,32 @@ async fn async_main() -> Result<()> {
         websocket_clipboard_poll_ms: 750,
         websocket_clipboard_max_bytes: 4096,
         mcp_servers: std::collections::HashMap::new(),
-        rag_register_url: cli.rag_register_url,
-        rag_token: cli.rag_token,
-        rag_register_name: cli.rag_register_name,
-        rag_register_host: cli.rag_register_host,
-        project_root: cli.project_root,
-    };
+        rag_register_url: None,
+        rag_token: None,
+        rag_register_name: None,
+        rag_register_host: None,
+        project_root: None,
+    });
+    config.socket_path = PathBuf::from("/tmp/terminal-share.sock");
+    config.websocket_bind = Some(cli.bind.clone());
+    if cli.rag_register_url.is_some() {
+        config.rag_register_url = cli.rag_register_url;
+    }
+    if cli.rag_token.is_some() {
+        config.rag_token = cli.rag_token;
+    }
+    if cli.rag_register_name.is_some() {
+        config.rag_register_name = cli.rag_register_name;
+    }
+    if cli.rag_register_host.is_some() {
+        config.rag_register_host = cli.rag_register_host;
+    }
+    if cli.project_root.is_some() {
+        config.project_root = cli.project_root;
+    }
 
-    let (local_start_tx, _local_start_rx) = mpsc::unbounded_channel();
+    let (local_start_tx, mut local_start_rx) =
+        mpsc::unbounded_channel::<telegram_acp::daemon::StartSessionRequest>();
     let websocket_events = Arc::new(BroadcastSessionEventSink::new(256));
     let session_event_sink: Arc<dyn SessionEventSink> = Arc::new(MultiSessionEventSink::new(vec![
         websocket_events.clone() as Arc<dyn SessionEventSink>,
@@ -104,6 +122,27 @@ async fn async_main() -> Result<()> {
         )),
         pending_permissions: Arc::new(dashmap::DashMap::new()),
         mdns: std::sync::Mutex::new(None),
+    });
+
+    let local_daemon = daemon.clone();
+    tokio::task::spawn_local(async move {
+        while let Some(req) = local_start_rx.recv().await {
+            let local_daemon = local_daemon.clone();
+            tokio::task::spawn_local(async move {
+                let res = local_daemon
+                    .start_session_local(
+                        req.thread_id,
+                        req.project_path,
+                        req.agent_cmd,
+                        req.agent_name,
+                        req.existing_acp_session_id,
+                        req.initiated_via_switch,
+                        req.initial_history,
+                    )
+                    .await;
+                let _ = req.result_tx.send(res);
+            });
+        }
     });
 
     if let Ok(addr) = cli.bind.parse::<std::net::SocketAddr>() {

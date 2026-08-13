@@ -41,15 +41,15 @@ pub struct DaemonHandle {
 }
 
 pub struct StartSessionRequest {
-    pub(crate) thread_id: i32,
-    pub(crate) project_path: PathBuf,
-    pub(crate) agent_cmd: String,
-    pub(crate) agent_name: Option<String>,
-    pub(crate) existing_acp_session_id: Option<String>,
+    pub thread_id: i32,
+    pub project_path: PathBuf,
+    pub agent_cmd: String,
+    pub agent_name: Option<String>,
+    pub existing_acp_session_id: Option<String>,
     /// Whether the session start request is initiated via `/switch` command in telegram.
-    pub(crate) initiated_via_switch: bool,
-    pub(crate) initial_history: Vec<SessionEvent>,
-    pub(crate) result_tx: oneshot::Sender<Result<String>>,
+    pub initiated_via_switch: bool,
+    pub initial_history: Vec<SessionEvent>,
+    pub result_tx: oneshot::Sender<Result<String>>,
 }
 
 impl DaemonHandle {
