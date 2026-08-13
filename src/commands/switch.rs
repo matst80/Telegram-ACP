@@ -22,7 +22,7 @@ impl Command for SwitchCommand {
     async fn execute(&self, ctx: CommandContext<'_>) -> Result<()> {
         let thread_id = ctx.require_thread_id()?;
 
-        let topic = ctx.daemon.topics.get(&thread_id);
+        let topic = ctx.daemon.session_manager.topics.get(&thread_id);
         let history = match &topic {
             Some(entry) => entry.history.clone(),
             None => {
@@ -112,7 +112,7 @@ impl Command for SwitchCommand {
         };
 
         let record = {
-            let Some(topic) = ctx.daemon.topics.get(&thread_id) else {
+            let Some(topic) = ctx.daemon.session_manager.topics.get(&thread_id) else {
                 ctx.bot
                     .answer_callback_query(ctx.query.id.clone())
                     .text("Topic no longer exists")

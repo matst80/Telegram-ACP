@@ -1,3 +1,5 @@
 /target
 result*
 .direnv/
+scratch/node_modules/
+secret.yaml

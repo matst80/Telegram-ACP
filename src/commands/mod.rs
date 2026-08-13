@@ -8,8 +8,10 @@ use teloxide::types::{BotCommand, CallbackQuery, Message};
 use crate::daemon::DaemonHandle;
 use crate::session_control::SessionControlState;
 
+mod approval;
 mod cancel;
 mod command;
+#[allow(clippy::module_inception)]
 mod commands;
 mod model;
 mod new;
@@ -21,6 +23,7 @@ mod stop_daemon;
 mod switch;
 mod timer;
 
+use approval::ApprovalCommand;
 use cancel::CancelCommand;
 use command::CommandCommand;
 use commands::CommandsCommand;
@@ -72,6 +75,7 @@ fn command_registry() -> Vec<Box<dyn Command>> {
         Box::new(CancelCommand),
         Box::new(ModelCommand),
         Box::new(PermissionCommand),
+        Box::new(ApprovalCommand),
         Box::new(RenameCommand),
         Box::new(RemoveCommand),
         Box::new(CommandsCommand),
@@ -173,7 +177,7 @@ pub async fn handle_callback_query(
         }
     };
 
-    if chat_id != ChatId(daemon.config.chat_id) {
+    if daemon.config.chat_id.map(ChatId) != Some(chat_id) {
         return Ok(());
     }
 
@@ -201,6 +205,7 @@ pub(super) async fn get_control_state(
     thread_id: i32,
 ) -> Result<SessionControlState> {
     let entry = daemon
+        .session_manager
         .topics
         .get(&thread_id)
         .and_then(|t| t.active.as_ref().map(|s| s.control_state.clone()))
@@ -215,6 +220,7 @@ pub(super) async fn set_permission_mode(
     mode_id: &str,
 ) -> Result<SessionControlState> {
     let (command_tx, control_state) = daemon
+        .session_manager
         .topics
         .get(&thread_id)
         .and_then(|t| {
@@ -246,6 +252,7 @@ pub(super) async fn set_config_option(
     value_id: &str,
 ) -> Result<SessionControlState> {
     let (command_tx, control_state) = daemon
+        .session_manager
         .topics
         .get(&thread_id)
         .and_then(|t| {

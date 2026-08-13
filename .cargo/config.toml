@@ -1,0 +1,2 @@
+[registries.k6n]
+index = "sparse+https://git.k6n.net/api/packages/mats/cargo/"

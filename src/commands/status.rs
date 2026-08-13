@@ -21,6 +21,7 @@ impl Command for StatusCommand {
 
         let topic = ctx
             .daemon
+            .session_manager
             .topics
             .get(&thread_id)
             .ok_or_else(|| anyhow::anyhow!("No topic found for this thread"))?;
@@ -36,13 +37,17 @@ impl Command for StatusCommand {
 
         let log_dir = active.session_log.log_dir().display().to_string();
 
+        let state = super::get_control_state(ctx.daemon, thread_id).await?;
+        let handling = format!("{:?}", state.permission_handling);
+
         let status_text = format!(
             "<b>Session Status</b>\n\n\
             <b>Agent:</b> {}\n\
             <b>Command:</b> <code>{}</code>\n\
             <b>Working Directory:</b> <code>{}</code>\n\
-            <b>Log Directory:</b> <code>{}</code>",
-            agent_name, agent_command, working_dir, log_dir
+            <b>Log Directory:</b> <code>{}</code>\n\
+            <b>Permission Handling:</b> {}",
+            agent_name, agent_command, working_dir, log_dir, handling
         );
 
         ctx.bot

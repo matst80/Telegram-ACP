@@ -2,14 +2,13 @@ use std::collections::HashMap;
 
 use agent_client_protocol as acp;
 use similar::TextDiff;
-use teloxide::types::MessageId;
 
-use super::{EventContext, EventHandler};
+use super::{EventContext, EventHandler, OutputRef};
 use crate::formatting;
 use crate::types::AgentEvent;
 
 struct ToolCallMessageState {
-    msg_id: MessageId,
+    msg_id: OutputRef,
     name: String,
     kind: acp::ToolKind,
     status: acp::ToolCallStatus,
@@ -31,17 +30,20 @@ impl ToolCallHandler {
 #[async_trait::async_trait(?Send)]
 impl EventHandler for ToolCallHandler {
     async fn handle(&mut self, event: &AgentEvent, ctx: &mut EventContext) -> bool {
-        match event {
-            AgentEvent::Update(acp::SessionUpdate::ToolCall(tool_call)) => {
-                self.handle_tool_call(tool_call, ctx).await;
-                true
+        if let AgentEvent::Update(update) = event {
+            match update.as_ref() {
+                acp::SessionUpdate::ToolCall(tool_call) => {
+                    self.handle_tool_call(tool_call, ctx).await;
+                    return true;
+                }
+                acp::SessionUpdate::ToolCallUpdate(update) => {
+                    self.handle_tool_call_update(update, ctx).await;
+                    return true;
+                }
+                _ => {}
             }
-            AgentEvent::Update(acp::SessionUpdate::ToolCallUpdate(update)) => {
-                self.handle_tool_call_update(update, ctx).await;
-                true
-            }
-            _ => false,
         }
+        false
     }
 
     async fn reset(&mut self, _ctx: &mut EventContext) {
@@ -56,7 +58,7 @@ impl ToolCallHandler {
         let kind = tool_call.kind;
         let status = tool_call.status;
         let details = extract_tool_diff(&tool_call.content);
-        if let Some(sent) = ctx
+        if let Some(id_ref) = ctx
             .send_html_drop(
                 &formatting::format_tool_call(&name, kind, status, details.as_deref()),
                 true,
@@ -66,7 +68,7 @@ impl ToolCallHandler {
             self.messages.insert(
                 id,
                 ToolCallMessageState {
-                    msg_id: sent.id,
+                    msg_id: id_ref,
                     name,
                     kind,
                     status,
@@ -136,11 +138,11 @@ impl ToolCallHandler {
             return;
         }
 
-        if let Some(sent) = ctx.send_html_drop(&text, true).await {
+        if let Some(id_ref) = ctx.send_html_drop(&text, true).await {
             self.messages.insert(
                 id,
                 ToolCallMessageState {
-                    msg_id: sent.id,
+                    msg_id: id_ref,
                     name: resolved_name,
                     kind: resolved_kind,
                     status: resolved_status,

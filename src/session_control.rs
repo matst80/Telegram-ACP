@@ -2,6 +2,8 @@ use agent_client_protocol as acp;
 use anyhow::Result;
 use tokio::sync::oneshot;
 
+use crate::types::PermissionHandling;
+
 #[derive(Debug, Clone)]
 pub struct SelectionOption {
     pub id: String,
@@ -20,11 +22,12 @@ pub struct SessionControlState {
     pub current_permission_mode_id: Option<String>,
     pub permission_modes: Vec<SelectionOption>,
     pub model_selector: Option<ModelSelectorState>,
+    pub permission_handling: PermissionHandling,
 }
 
 #[derive(Debug)]
 pub enum SessionCommand {
-    Prompt(String),
+    Prompt(Vec<acp::ContentBlock>),
     SetPermissionMode {
         mode_id: String,
         result_tx: oneshot::Sender<Result<()>>,
@@ -32,6 +35,14 @@ pub enum SessionCommand {
     SetConfigOption {
         config_id: String,
         value_id: String,
+        result_tx: oneshot::Sender<Result<()>>,
+    },
+    SetPermissionHandling {
+        handling: PermissionHandling,
+    },
+    ExecuteCommand {
+        command_id: String,
+        arguments: serde_json::Value,
         result_tx: oneshot::Sender<Result<()>>,
     },
 }
@@ -52,6 +63,7 @@ fn flatten_select_options(
 pub fn build_control_state(
     mode_state: &Option<acp::SessionModeState>,
     config_options: &[acp::SessionConfigOption],
+    permission_handling: PermissionHandling,
 ) -> SessionControlState {
     let (current_permission_mode_id, permission_modes) = match mode_state {
         Some(state) => (
@@ -90,5 +102,6 @@ pub fn build_control_state(
         current_permission_mode_id,
         permission_modes,
         model_selector,
+        permission_handling,
     }
 }

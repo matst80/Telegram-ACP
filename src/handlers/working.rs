@@ -1,10 +1,8 @@
-use teloxide::types::MessageId;
-
-use super::EventContext;
+use super::{EventContext, OutputRef};
 use crate::types::AgentEvent;
 
 pub struct WorkingHandler {
-    msg_id: Option<MessageId>,
+    msg_id: Option<OutputRef>,
 }
 
 impl WorkingHandler {
@@ -18,11 +16,8 @@ impl WorkingHandler {
         if !matches!(event, AgentEvent::Working) {
             return false;
         }
-        if let Some(sent) = ctx
-            .send_html("⏳ <i>Working on it...</i>", true)
-            .await
-        {
-            self.msg_id = Some(sent.id);
+        if let Some(id_ref) = ctx.send_html("⏳ <i>Working on it...</i>", true).await {
+            self.msg_id = Some(id_ref);
         }
         true
     }

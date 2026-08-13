@@ -7,6 +7,7 @@ use crate::types::{SessionInfo, SessionRecord};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedTopic {
     pub thread_id: i32,
+    pub name: Option<String>,
     pub active_session_id: Option<String>,
     pub sessions: Vec<SessionRecord>,
 }
@@ -45,7 +46,10 @@ pub fn load_topics() -> Vec<PersistedTopic> {
 
     // Fall back to legacy Vec<SessionInfo> format
     if let Ok(sessions) = serde_json::from_str::<Vec<SessionInfo>>(&data) {
-        tracing::info!("Migrating {} legacy session(s) to topic format", sessions.len());
+        tracing::info!(
+            "Migrating {} legacy session(s) to topic format",
+            sessions.len()
+        );
         return sessions
             .into_iter()
             .map(|s| {
@@ -57,9 +61,11 @@ pub fn load_topics() -> Vec<PersistedTopic> {
                     agent_name: None,
                     created_at: now,
                     last_updated_at: now,
+                    history: Vec::new(),
                 };
                 PersistedTopic {
-                    thread_id: s.thread_id,
+                    thread_id: s.thread_id.unwrap_or(0),
+                    name: s.name,
                     active_session_id: Some(s.acp_session_id),
                     sessions: vec![record],
                 }

@@ -43,8 +43,14 @@ pub struct SessionInfo {
     pub acp_session_id: String,
     pub project_path: PathBuf,
     pub status: SessionStatus,
-    pub thread_id: i32,
+    pub thread_id: Option<i32>,
+    pub name: Option<String>,
     pub agent_command: String,
+    pub agent_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub available_commands: Vec<acp::AvailableCommand>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history: Vec<crate::relay::SessionEvent>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,6 +62,12 @@ pub enum SessionStatus {
     Error,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PermissionHandling {
+    Auto,
+    Manual,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionRecord {
     pub acp_session_id: String,
@@ -65,15 +77,18 @@ pub struct SessionRecord {
     pub agent_name: Option<String>,
     pub created_at: DateTime<Utc>,
     pub last_updated_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history: Vec<crate::relay::SessionEvent>,
 }
 
 // === Agent Events (sent from ACP Client impl to Telegram sender) ===
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 #[allow(dead_code)]
 pub enum AgentEvent {
     Working,
-    Update(acp::SessionUpdate),
-    Finished(String),
-    Error(String),
+    Update(Box<acp::SessionUpdate>),
+    Finished { content: String },
+    Error { content: String },
 }

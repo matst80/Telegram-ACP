@@ -1,8 +1,8 @@
 use agent_client_protocol as acp;
+use similar::TextDiff;
 use telegram_markdown_v2::UnsupportedTagsStrategy;
 
 /// MarkdownV2 formatting utilities for Telegram messages.
-
 /// Convert regular Markdown into Telegram MarkdownV2 using Escape strategy for unsupported tags.
 pub fn markdown_to_telegram_md_v2(markdown: &str) -> String {
     match telegram_markdown_v2::convert_with_strategy(markdown, UnsupportedTagsStrategy::Escape) {
@@ -45,12 +45,41 @@ pub fn format_text_message(text: &str) -> String {
 
 /// Format a thought/reasoning message for Telegram (HTML).
 pub fn format_thought_message(text: &str) -> String {
+    let cleaned = clean_thought_text(text);
     let header = "💭 <b>Thought</b>";
-    if text.trim().is_empty() {
+    if cleaned.is_empty() {
         header.to_string()
     } else {
-        format!("{header}\n{}", format_collapsible_block_html(text, 3900))
+        format!("{header}\n{}", format_collapsible_block_html(&cleaned, 3900))
     }
+}
+
+/// Clean thought text by removing common agent prefixes (like Claude Code's "💭 Thought" and CWD).
+pub fn clean_thought_text(text: &str) -> String {
+    let mut cleaned = text.trim();
+
+    // Strip "💭 Thought"
+    if cleaned.starts_with("💭 Thought") {
+        cleaned = cleaned["💭 Thought".len()..].trim_start();
+    }
+
+    // Strip "[current working directory ...]"
+    if cleaned.starts_with("[current working directory") {
+        if let Some(pos) = cleaned.find(']') {
+            cleaned = cleaned[pos + 1..].trim_start();
+        }
+    }
+
+    // Strip leading '(' and trailing ')' if they wrap the content
+    let mut result = cleaned.to_string();
+    if result.starts_with('(') {
+        result.remove(0);
+    }
+    if result.ends_with(')') {
+        result.pop();
+    }
+
+    result.trim().to_string()
 }
 
 /// Format a tool call notification (HTML).
@@ -71,7 +100,9 @@ pub fn format_tool_result(
     output: Option<&str>,
     details: Option<&str>,
 ) -> String {
-    let body = details.or(output).map(|text| truncate_message_tail(text, 1000));
+    let body = details
+        .or(output)
+        .map(|text| truncate_message_tail(text, 1000));
     format_tool_message(name, kind, status, body.as_deref(), 1000)
 }
 
@@ -127,6 +158,59 @@ pub fn format_plan(plan: &acp::Plan) -> String {
     }
 
     lines.join("\n")
+}
+
+/// Format tool content (HTML).
+pub fn format_tool_content(contents: &[acp::ToolCallContent]) -> String {
+    let mut parts = Vec::new();
+    for content in contents {
+        match content {
+            acp::ToolCallContent::Content(content) => {
+                let text = match &content.content {
+                    acp::ContentBlock::Text(tc) => tc.text.clone(),
+                    _ => String::new(),
+                };
+                if !text.trim().is_empty() {
+                    parts.push(escape_html(&truncate_message(&text, 1000)));
+                }
+            }
+            acp::ToolCallContent::Diff(diff) => {
+                let diff_text = format_unified_diff(
+                    Some(diff.path.display().to_string()),
+                    diff.old_text.as_deref(),
+                    &diff.new_text,
+                );
+                parts.push(format!(
+                    "<pre>{}</pre>",
+                    escape_html(&truncate_message(&diff_text, 2000))
+                ));
+            }
+            _ => {}
+        }
+    }
+    if parts.is_empty() {
+        "<i>(no content)</i>".to_string()
+    } else {
+        parts.join("\n\n")
+    }
+}
+
+pub fn format_unified_diff(path: Option<String>, old_text: Option<&str>, new_text: &str) -> String {
+    let old = old_text.unwrap_or("");
+    let path = path.unwrap_or_else(|| "file".to_string());
+    let old_header = format!("a/{path}");
+    let new_header = format!("b/{path}");
+    let unified = TextDiff::from_lines(old, new_text)
+        .unified_diff()
+        .context_radius(2)
+        .header(&old_header, &new_header)
+        .to_string();
+
+    if unified.trim().is_empty() {
+        format!("--- {old_header}\n+++ {new_header}\n(no changes)")
+    } else {
+        unified
+    }
 }
 
 /// Format a completed plan message (HTML).
@@ -189,11 +273,7 @@ fn format_tool_message(
     sections.join("\n")
 }
 
-fn format_tool_header_html(
-    name: &str,
-    kind: acp::ToolKind,
-    status: acp::ToolCallStatus,
-) -> String {
+fn format_tool_header_html(name: &str, kind: acp::ToolKind, status: acp::ToolCallStatus) -> String {
     let truncated_name = truncate_message(name, 500);
     let status_icon = match status {
         acp::ToolCallStatus::Pending => "⏳",
@@ -283,9 +363,7 @@ pub fn split_message(text: &str, max_len: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        format_available_commands_html, format_tool_call, markdown_to_telegram_md_v2,
-    };
+    use super::{format_available_commands_html, format_tool_call, markdown_to_telegram_md_v2};
     use agent_client_protocol as acp;
 
     #[test]
@@ -392,5 +470,19 @@ mod tests {
         assert!(text.contains("/<code>"));
         assert!(text.contains("</code>"));
         assert!(!text.contains("<tag>"));
+    }
+
+    #[test]
+    fn cleans_thought_prefixes() {
+        use super::clean_thought_text;
+        let input = "💭 Thought\n[current working directory /home/mats/github.com/matst80/magic-mirror-native] (Checking for available font packages on the Pi.)";
+        let cleaned = clean_thought_text(input);
+        assert_eq!(cleaned, "Checking for available font packages on the Pi.");
+
+        let input_simple = "💭 Thought (Doing things)";
+        assert_eq!(clean_thought_text(input_simple), "Doing things");
+
+        let input_partial = "💭 Thought\n[current working directory /tmp] (Wait...";
+        assert_eq!(clean_thought_text(input_partial), "Wait...");
     }
 }

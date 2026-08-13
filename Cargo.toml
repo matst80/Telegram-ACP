@@ -6,6 +6,7 @@ default-run = "telegram-acp"
 license = "MIT"
 repository = "https://github.com/SuperKenVery/telegram-acp"
 description = "Bridge Telegram and ACP coding agents"
+publish = ["k6n"]
 
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }.tar.gz"
@@ -17,8 +18,9 @@ agent-client-protocol = { version = "0.10", features = ["unstable_session_usage"
 reqwest = { version = "0.12", features = ["json", "socks"] }
 anyhow = "1"
 async-trait = "0.1"
+base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 dashmap = "6"
 futures = "0.3"
 rmcp = { version = "1.2", features = ["server", "macros"] }
@@ -32,6 +34,7 @@ teloxide = { version = "0.17", features = ["macros"] }
 telegram-markdown-v2 = "0.2"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.24"
 tokio-util = { version = "0.7", features = ["compat"] }
 toml = "1.0"
 dirs = "5"
@@ -40,3 +43,7 @@ rolling-file = "0.2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
+mdns-sd = "0.13"
+if-addrs = "0.13"
+portable-pty = "0.9"
+vt100 = "0.15"

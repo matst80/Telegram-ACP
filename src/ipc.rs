@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use serde_json;
 use std::path::Path;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};

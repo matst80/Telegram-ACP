@@ -3,8 +3,8 @@ use teloxide::types::ParseMode;
 
 use super::EventContext;
 use crate::formatting;
-use crate::types::AgentEvent;
 use crate::sess_warn;
+use crate::types::AgentEvent;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DraftKind {
@@ -30,20 +30,23 @@ impl DraftHandler {
     /// Returns true if the event was a text chunk (consumed).
     pub async fn handle(&mut self, event: &AgentEvent, ctx: &mut EventContext) -> bool {
         match event {
-            AgentEvent::Update(acp::SessionUpdate::AgentMessageChunk(chunk)) => {
-                let t = extract_text(&chunk.content);
-                if !t.is_empty() {
-                    self.accumulate(&t, DraftKind::AgentMessage, ctx).await;
+            AgentEvent::Update(update) => match update.as_ref() {
+                acp::SessionUpdate::AgentMessageChunk(chunk) => {
+                    let t = extract_text(&chunk.content);
+                    if !t.is_empty() {
+                        self.accumulate(&t, DraftKind::AgentMessage, ctx).await;
+                    }
+                    true
                 }
-                true
-            }
-            AgentEvent::Update(acp::SessionUpdate::AgentThoughtChunk(chunk)) => {
-                let t = extract_text(&chunk.content);
-                if !t.is_empty() {
-                    self.accumulate(&t, DraftKind::AgentThought, ctx).await;
+                acp::SessionUpdate::AgentThoughtChunk(chunk) => {
+                    let t = extract_text(&chunk.content);
+                    if !t.is_empty() {
+                        self.accumulate(&t, DraftKind::AgentThought, ctx).await;
+                    }
+                    true
                 }
-                true
-            }
+                _ => false,
+            },
             _ => false,
         }
     }
@@ -81,46 +84,20 @@ impl DraftHandler {
             kind,
         });
         d.text.push_str(text);
-        if let Err(e) = send_streaming_draft(ctx, d.draft_id, &d.text).await {
-            sess_warn!("Draft message update failed ({} bytes): {}", d.text.len(), e);
+
+        let display_text = match kind {
+            DraftKind::AgentThought => formatting::clean_thought_text(&d.text),
+            _ => d.text.clone(),
+        };
+
+        if let Err(e) = ctx.send_draft(d.draft_id, &display_text).await {
+            sess_warn!(
+                "Draft message update failed ({} bytes): {}",
+                d.text.len(),
+                e
+            );
         }
     }
-}
-
-/// Send a streaming draft update via the raw Telegram Bot API (sendMessageDraft).
-/// Non-blocking: skips if within the throttle window.
-async fn send_streaming_draft(
-    ctx: &mut EventContext,
-    draft_id: i64,
-    text: &str,
-) -> anyhow::Result<()> {
-    if !ctx.throttle.try_turn() {
-        return Ok(());
-    }
-    let client = ctx.bot.client();
-    let token = ctx.bot.token();
-    let url = format!("https://api.telegram.org/bot{token}/sendMessageDraft");
-    let telegram_text = formatting::markdown_to_telegram_md_v2(text);
-    let draft_text = formatting::truncate_message(&telegram_text, 4096);
-
-    let mut body = serde_json::json!({
-        "chat_id": ctx.chat_id.0,
-        "draft_id": draft_id,
-        "text": draft_text,
-        "parse_mode": "MarkdownV2",
-    });
-
-    if ctx.thread_id != 0 {
-        body["message_thread_id"] = serde_json::json!(ctx.thread_id);
-    }
-
-    let resp = client.post(&url).json(&body).send().await?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body_text = resp.text().await.unwrap_or_default();
-        anyhow::bail!("sendMessageDraft failed ({status}): {body_text}");
-    }
-    Ok(())
 }
 
 fn extract_text(content: &acp::ContentBlock) -> String {

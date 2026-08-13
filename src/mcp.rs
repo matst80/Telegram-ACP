@@ -18,16 +18,27 @@ use teloxide::types::{InputFile, MessageId, ThreadId};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+use crate::ipc;
 use crate::telegraph;
+use crate::types::{DaemonCommand, DaemonResponse};
 
 #[derive(Clone)]
 struct McpServer {
-    bot: Bot,
+    bot: Option<Bot>,
     telegraph: Arc<telegraph_rs::Telegraph>,
-    chat_id: ChatId,
-    thread_id: i32,
+    chat_id: Option<ChatId>,
+    thread_id: Option<i32>,
     project_path: PathBuf,
+    socket_path: PathBuf,
     tool_router: ToolRouter<McpServer>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SpawnAgentArgs {
+    /// Absolute or project-relative path to the project directory
+    directory: String,
+    /// Optional agent name (defined in config)
+    agent: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -45,6 +56,12 @@ struct UploadFileArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct RenameTopicArgs {
+    /// The new name for the Telegram topic
+    name: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct UploadImageArgs {
     /// Absolute or project-relative path
     path: String,
@@ -53,6 +70,77 @@ struct UploadImageArgs {
 
 #[tool_router]
 impl McpServer {
+    /// Change the name of the current Telegram forum topic (thread)
+    #[tool]
+    async fn rename_topic(
+        &self,
+        Parameters(args): Parameters<RenameTopicArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let (Some(bot), Some(chat_id), Some(tid)) = (&self.bot, self.chat_id, self.thread_id) else {
+            return Err(ErrorData::new(
+                ErrorCode::INVALID_PARAMS,
+                "No Telegram bot/chat/thread associated with this session",
+                None,
+            ));
+        };
+        let thread_id = ThreadId(MessageId(tid));
+        if let Err(e) = bot
+            .edit_forum_topic(chat_id, thread_id)
+            .name(&args.name)
+            .await
+        {
+            return Err(ErrorData::new(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Failed to rename topic: {e}"),
+                None,
+            ));
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Topic successfully renamed to: {}",
+            args.name
+        ))]))
+    }
+
+    /// Create a new agent session in a new Telegram topic
+    #[tool]
+    async fn spawn_agent(
+        &self,
+        Parameters(args): Parameters<SpawnAgentArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let resolved_path = resolve_path(&self.project_path, &args.directory);
+
+        let cmd = DaemonCommand::NewSession {
+            path: resolved_path,
+            prompt: None,
+            agent: args.agent,
+        };
+
+        match ipc::send_command(&self.socket_path, &cmd).await {
+            Ok(DaemonResponse::SessionCreated {
+                acp_session_id: _,
+                topic_url,
+            }) => Ok(CallToolResult::success(vec![Content::text(format!(
+                "New agent session spawned: {topic_url}"
+            ))])),
+            Ok(DaemonResponse::Error { message }) => Err(ErrorData::new(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Daemon failed to spawn session: {message}"),
+                None,
+            )),
+            Ok(_) => Err(ErrorData::new(
+                ErrorCode::INTERNAL_ERROR,
+                "Unexpected daemon response",
+                None,
+            )),
+            Err(e) => Err(ErrorData::new(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Failed to communicate with daemon: {e}"),
+                None,
+            )),
+        }
+    }
+
     /// Render Markdown file to Telegraph and send link to the user
     #[tool]
     async fn upload_markdown(
@@ -68,10 +156,12 @@ impl McpServer {
             .await
             .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, e.to_string(), None))?;
 
-        let thread_id = ThreadId(MessageId(self.thread_id));
-        if let Err(e) = self
-            .bot
-            .send_message(self.chat_id, format!("Telegraph: {url}"))
+        let (Some(bot), Some(chat_id), Some(tid)) = (&self.bot, self.chat_id, self.thread_id) else {
+            return Ok(CallToolResult::success(vec![Content::text(url)]));
+        };
+        let thread_id = ThreadId(MessageId(tid));
+        if let Err(e) = bot
+            .send_message(chat_id, format!("Telegraph: {url}"))
             .message_thread_id(thread_id)
             .await
         {
@@ -93,10 +183,16 @@ impl McpServer {
     ) -> Result<CallToolResult, ErrorData> {
         let (input, filename) = build_input_file(&self.project_path, &args.path)?;
 
-        let thread_id = ThreadId(MessageId(self.thread_id));
-        let mut request = self
-            .bot
-            .send_document(self.chat_id, input)
+        let (Some(bot), Some(chat_id), Some(tid)) = (&self.bot, self.chat_id, self.thread_id) else {
+            return Err(ErrorData::new(
+                ErrorCode::INVALID_PARAMS,
+                "No Telegram thread associated with this session",
+                None,
+            ));
+        };
+        let thread_id = ThreadId(MessageId(tid));
+        let mut request = bot
+            .send_document(chat_id, input)
             .message_thread_id(thread_id);
         if let Some(caption) = args.caption {
             request = request.caption(caption);
@@ -118,10 +214,16 @@ impl McpServer {
     ) -> Result<CallToolResult, ErrorData> {
         let (input, filename) = build_input_file(&self.project_path, &args.path)?;
 
-        let thread_id = ThreadId(MessageId(self.thread_id));
-        let mut request = self
-            .bot
-            .send_photo(self.chat_id, input)
+        let (Some(bot), Some(chat_id), Some(tid)) = (&self.bot, self.chat_id, self.thread_id) else {
+            return Err(ErrorData::new(
+                ErrorCode::INVALID_PARAMS,
+                "No Telegram thread associated with this session",
+                None,
+            ));
+        };
+        let thread_id = ThreadId(MessageId(tid));
+        let mut request = bot
+            .send_photo(chat_id, input)
             .message_thread_id(thread_id);
         if let Some(caption) = args.caption {
             request = request.caption(caption);
@@ -150,11 +252,12 @@ impl ServerHandler for McpServer {
 
 impl McpServer {
     fn new(
-        bot: Bot,
+        bot: Option<Bot>,
         telegraph: Arc<telegraph_rs::Telegraph>,
-        chat_id: ChatId,
-        thread_id: i32,
+        chat_id: Option<ChatId>,
+        thread_id: Option<i32>,
         project_path: PathBuf,
+        socket_path: PathBuf,
     ) -> Self {
         Self {
             bot,
@@ -162,6 +265,7 @@ impl McpServer {
             chat_id,
             thread_id,
             project_path,
+            socket_path,
             tool_router: Self::tool_router(),
         }
     }
@@ -175,17 +279,25 @@ pub struct McpSession {
 
 impl McpSession {
     pub async fn new(
-        bot: Bot,
+        bot: Option<Bot>,
         telegraph: Arc<telegraph_rs::Telegraph>,
-        chat_id: ChatId,
-        thread_id: i32,
+        chat_id: Option<ChatId>,
+        thread_id: Option<i32>,
         project_path: PathBuf,
+        socket_path: PathBuf,
     ) -> Result<Self> {
         let id = Uuid::new_v4().to_string();
         let (incoming_tx, incoming_rx) = mpsc::unbounded();
         let (outgoing_tx, outgoing_rx) = mpsc::unbounded();
 
-        let server = McpServer::new(bot, telegraph, chat_id, thread_id, project_path);
+        let server = McpServer::new(
+            bot,
+            telegraph,
+            chat_id,
+            thread_id,
+            project_path,
+            socket_path,
+        );
         let session_id_for_log = id.clone();
         tokio::task::spawn_local(async move {
             tracing::debug!(session_id = %session_id_for_log, "MCP server task started, waiting for initialize");
@@ -219,7 +331,7 @@ impl McpSession {
         Ok(())
     }
 
-    pub async fn next_response(&self) -> Option<TxJsonRpcMessage<RoleServer>> {
+pub async fn next_response(&self) -> Option<TxJsonRpcMessage<RoleServer>> {
         tracing::debug!(session_id = %self.id, "MCP session: waiting for response");
         let mut rx = self.outgoing_rx.lock().await;
         let result = rx.next().await;
@@ -230,6 +342,64 @@ impl McpSession {
             }
         }
         result
+    }
+}
+
+pub fn build_mcp_servers(
+    mcp_session_id: &str,
+    socket_path: &std::path::Path,
+    config: &crate::config::Config,
+) -> Result<Vec<agent_client_protocol::McpServer>> {
+    let exe_path = std::env::current_exe()
+        .map_err(|e| anyhow!("Failed to resolve current executable: {e}"))?;
+    let args = vec![
+        "mcp-relay".to_string(),
+        "--session".to_string(),
+        mcp_session_id.to_string(),
+        "--socket".to_string(),
+        socket_path.to_string_lossy().to_string(),
+    ];
+    let mut servers = vec![agent_client_protocol::McpServer::Stdio(
+        agent_client_protocol::McpServerStdio::new("telegram-acp-relay", exe_path).args(args),
+    )];
+
+    for (name, mcp_cfg) in &config.mcp_servers {
+        let ty = mcp_cfg.r#type.as_deref().unwrap_or("").to_lowercase();
+        if ty == "stdio" || mcp_cfg.command.is_some() {
+            if let Some(cmd) = &mcp_cfg.command {
+                let mut s = agent_client_protocol::McpServerStdio::new(name, cmd);
+                if let Some(args) = &mcp_cfg.args {
+                    s = s.args(args.clone());
+                }
+                servers.push(agent_client_protocol::McpServer::Stdio(s));
+            }
+        } else {
+            let url_val = mcp_cfg.url.clone()
+                .or_else(|| mcp_cfg.server_url_camel.clone())
+                .or_else(|| mcp_cfg.server_url_snake.clone());
+            if let Some(u) = url_val {
+                if ty == "sse" {
+                    servers.push(agent_client_protocol::McpServer::Sse(agent_client_protocol::McpServerSse::new(name, u)));
+                } else {
+                    servers.push(agent_client_protocol::McpServer::Http(agent_client_protocol::McpServerHttp::new(name, u)));
+                }
+            }
+        }
+    }
+
+    Ok(servers)
+}
+
+pub fn mcp_expects_response(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(map) => map.get("id").map(|id| !id.is_null()).unwrap_or(false),
+        serde_json::Value::Array(items) => items.iter().any(|item| {
+            item.as_object()
+                .and_then(|map| map.get("id"))
+                .map(|id| !id.is_null())
+                .unwrap_or(false)
+        }),
+        _ => false,
     }
 }
 

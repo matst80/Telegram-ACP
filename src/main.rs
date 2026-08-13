@@ -1,5 +1,6 @@
 mod acp;
 mod commands;
+mod clipboard;
 mod config;
 mod daemon;
 mod formatting;
@@ -8,13 +9,19 @@ mod ipc;
 mod mcp;
 mod mcp_relay;
 mod persistence;
+mod relay;
 mod session;
-mod session_log;
+mod session_consumer;
 mod session_control;
+mod session_log;
+mod session_manager;
+mod session_runtime;
 mod telegram;
 #[allow(dead_code)]
 mod telegraph;
+mod terminal;
 mod types;
+mod websocket;
 
 use clap::{Parser, Subcommand};
 use rolling_file::{BasicRollingFileAppender, RollingConditionBasic};
@@ -34,7 +41,29 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Start the daemon (bot + IPC listener)
-    Daemon,
+    Daemon {
+        /// RAG registration URL
+        #[arg(long, env = "TELEGRAM_ACP_RAG_REGISTER_URL")]
+        rag_register_url: Option<String>,
+        /// RAG token
+        #[arg(long, env = "TELEGRAM_ACP_RAG_TOKEN")]
+        rag_token: Option<String>,
+        /// RAG registration name
+        #[arg(long, env = "TELEGRAM_ACP_RAG_REGISTER_NAME")]
+        rag_register_name: Option<String>,
+        /// RAG registration host
+        #[arg(long, env = "TELEGRAM_ACP_RAG_REGISTER_HOST")]
+        rag_register_host: Option<String>,
+        /// WebSocket bind address (e.g. 0.0.0.0:9001)
+        #[arg(long, env = "TELEGRAM_ACP_WEBSOCKET_BIND")]
+        websocket_bind: Option<String>,
+        /// Enable global clipboard interception for websocket clipboard relay
+        #[arg(long, action = clap::ArgAction::SetTrue)]
+        global_clipboard_intercept: bool,
+        /// Project root for listing projects
+        #[arg(long, env = "TELEGRAM_ACP_PROJECT_ROOT")]
+        project_root: Option<PathBuf>,
+    },
     /// Spawn a new agent session
     New {
         /// Project path for the agent to work in
@@ -87,8 +116,38 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Daemon => {
-            let config = config::Config::load()?;
+        Commands::Daemon {
+            rag_register_url,
+            rag_token,
+            rag_register_name,
+            rag_register_host,
+            websocket_bind,
+            global_clipboard_intercept,
+            project_root,
+        } => {
+            let mut config = config::Config::load()?;
+            if rag_register_url.is_some() {
+                config.rag_register_url = rag_register_url;
+            }
+            if rag_token.is_some() {
+                config.rag_token = rag_token;
+            }
+            if rag_register_name.is_some() {
+                config.rag_register_name = rag_register_name;
+            }
+            if rag_register_host.is_some() {
+                config.rag_register_host = rag_register_host;
+            }
+            if websocket_bind.is_some() {
+                config.websocket_bind = websocket_bind;
+            }
+            if global_clipboard_intercept {
+                config.global_clipboard_intercept = true;
+            }
+            if project_root.is_some() {
+                config.project_root = project_root;
+            }
+
             // Run inside a LocalSet since ACP requires spawn_local
             let local = tokio::task::LocalSet::new();
             local.run_until(daemon::run_daemon(config)).await?;
@@ -142,6 +201,8 @@ async fn main() -> anyhow::Result<()> {
                                 s.project_path.display(),
                                 s.status,
                                 s.thread_id
+                                    .map(|id| id.to_string())
+                                    .unwrap_or_else(|| "headless".to_string())
                             );
                         }
                     }
